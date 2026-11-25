@@ -37,12 +37,28 @@ def receiver(agent, env, *, volatile, codec):
                 return event["identity"], event["directory_identity"]
     if run.returncode != 0:
         print(f"{label}: receiver exited with status {run.returncode}", flush=True)
-        for line in run.stderr.splitlines():
-            if line.startswith("NexDesk agent:") or "dyld" in line:
-                print(line, flush=True)
+        for line in run.stderr.splitlines()[-30:]:
+            print(line, flush=True)
+        if run.returncode < 0 and volatile and codec == "h264" and os.getenv("GITHUB_ACTIONS") == "true":
+            trace_crash(command, env)
     else:
         print(f"{label}: receiver exited before reporting ready", flush=True)
     return None
+
+
+def trace_crash(command, env):
+    try:
+        trace = subprocess.run(
+            ["xcrun", "lldb", "--batch", "-o", "run", "-k", "thread backtrace", "--", *command],
+            input='{"command":"stop"}\n', capture_output=True, text=True, env=env,
+            timeout=25, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        print("Native crash backtrace is unavailable.", flush=True)
+        return
+    for line in (trace.stdout + trace.stderr).splitlines():
+        if not line.lstrip().startswith("{"):
+            print(line, flush=True)
 
 
 def check(app):
