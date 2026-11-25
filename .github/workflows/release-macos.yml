@@ -7,6 +7,20 @@ on:
         description: Existing release tag (for example, v0.1.4)
         required: true
         type: string
+      architecture:
+        description: Architectures to package
+        type: choice
+        default: all
+        options: [all, arm64, x64]
+      arm_runner:
+        description: Apple Silicon runner image
+        type: choice
+        default: macos-15
+        options: [macos-15, macos-26]
+      archive_only:
+        description: Save Actions artifacts without attaching them to the release
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -14,16 +28,12 @@ permissions:
 jobs:
   package:
     name: macOS ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.arch == 'arm64' && inputs.arm_runner || 'macos-15-intel' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-15
-            arch: arm64
-          - runner: macos-15-intel
-            arch: x64
+        arch: ${{ fromJSON(inputs.architecture == 'all' && '["arm64","x64"]' || format('["{0}"]', inputs.architecture)) }}
 
     steps:
       - name: Check out the release tag
@@ -74,6 +84,7 @@ jobs:
           compression-level: 0
 
       - name: Attach archive to release
+        if: ${{ !inputs.archive_only }}
         env:
           GH_TOKEN: ${{ github.token }}
           NEXDESK_TAG: ${{ inputs.tag }}
