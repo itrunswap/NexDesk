@@ -21,6 +21,10 @@ on:
         description: Save Actions artifacts without attaching them to the release
         type: boolean
         default: false
+      verify_download:
+        description: Check the runtime of the existing public release packages
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -48,7 +52,9 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           path: packaging
-          sparse-checkout: tools/release/package-macos.sh
+          sparse-checkout: |
+            tools/release/package-macos.sh
+            tools/release/check-macos-runtime.py
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -62,7 +68,25 @@ jobs:
           [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && $NEXDESK_TAG == "v$version" ]]
           printf 'NEXDESK_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
 
+      - name: Test the published bundle
+        if: ${{ inputs.verify_download }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXDESK_TAG: ${{ inputs.tag }}
+          NEXDESK_ARCH: ${{ matrix.arch }}
+        run: |
+          set -eu
+          work=$(mktemp -d "$RUNNER_TEMP/nexdesk-download.XXXXXX")
+          archive="NexDesk-$NEXDESK_VERSION-Desktop-macOS-$NEXDESK_ARCH.zip"
+          gh release download "$NEXDESK_TAG" --repo "$GITHUB_REPOSITORY" --dir "$work" \
+            --pattern "$archive" --pattern "$archive.sha256"
+          (cd "$work" && shasum -a 256 -c "$archive.sha256")
+          ditto -x -k "$work/$archive" "$work"
+          codesign --verify --deep --strict "$work/NexDesk.app"
+          python3 packaging/tools/release/check-macos-runtime.py "$work/NexDesk.app"
+
       - name: Set up Rust and Flutter
+        if: ${{ !inputs.verify_download }}
         working-directory: source
         run: |
           rustup toolchain install 1.96.0 --profile minimal
@@ -72,9 +96,11 @@ jobs:
           "$RUNNER_TEMP/flutter/bin/flutter" --suppress-analytics --no-version-check precache --macos
 
       - name: Build and verify archive
+        if: ${{ !inputs.verify_download }}
         run: NEXDESK_SOURCE_ROOT="$GITHUB_WORKSPACE/source" bash packaging/tools/release/package-macos.sh
 
       - name: Save verified archive
+        if: ${{ !inputs.verify_download }}
         uses: actions/upload-artifact@v4
         with:
           name: macOS-${{ matrix.arch }}-preview
@@ -84,7 +110,7 @@ jobs:
           compression-level: 0
 
       - name: Attach archive to release
-        if: ${{ !inputs.archive_only }}
+        if: ${{ !inputs.verify_download && !inputs.archive_only }}
         env:
           GH_TOKEN: ${{ github.token }}
           NEXDESK_TAG: ${{ inputs.tag }}
