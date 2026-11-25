@@ -1,6 +1,6 @@
 # 各端运行与打包
 
-在仓库根目录运行各段命令，或按示例切换到对应子目录。通过 `git checkout v0.1.4` 可使用对应的发行源码。桌面和移动版本取自 `apps/desktop/pubspec.yaml`，目录协议版本通过 `/healthz` 查看。
+在仓库根目录运行各段命令，或按示例切换到对应子目录。Windows、Linux、Android 和自托管的 `0.1.4` 发行源码使用 `v0.1.4` 标签，macOS 修复版使用 `v0.1.5` 标签。桌面和移动版本取自 `apps/desktop/pubspec.yaml`，目录协议版本通过 `/healthz` 查看。
 
 | 工具 | 版本与用途 |
 | --- | --- |
@@ -56,7 +56,7 @@ bash tools/release/package-macos.sh
 
 输出在 `target/release-<版本号>/`，包括 `NexDesk.app` 的 ZIP 和独立 SHA-256 文件。首次作为被控端使用时，在「系统设置 → 隐私与安全性」授予屏幕录制和辅助功能权限。GitHub 预览包使用 ad hoc 签名，Gatekeeper 可能要求到「隐私与安全性」确认打开。用于正式分发时设置 `NEXDESK_MACOS_SIGN_IDENTITY` 和 `NEXDESK_NOTARY_PROFILE` 再执行同一脚本，完成 Developer ID 签名、公证和 stapling。[Apple 的应用打开说明](https://support.apple.com/102445)
 
-GitHub Actions 使用发行标签中的应用源码和本次工作流所在提交的打包脚本。手动构建 `v0.1.4` 时，可在标签工作目录中执行 `git show origin/main:tools/release/package-macos.sh | NEXDESK_SOURCE_ROOT="$PWD" bash`，以使用修正后的架构校验脚本。
+GitHub Actions 使用发行标签中的应用源码和本次工作流所在提交的打包脚本。发布前在签名后的包内启动接收程序，验证原生媒体初始化、临时钥匙串中的凭据写入和重启后设备身份恢复。
 
 ## Linux
 

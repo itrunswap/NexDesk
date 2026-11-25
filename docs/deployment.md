@@ -105,6 +105,8 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml --profile turn up -
 
 验收时可以暂设 `NEXDESK_ICE_RELAY_ONLY=1`，重启目录后从不同网段建立会话并查看连接方式。完成后恢复默认 `0`，由 ICE 优先选用可达路径。
 
+如果设备已在线且被控端同意，但会话停在等待画面，先从公网核对 TURN 的 TCP、UDP 3478，再检查中继 UDP 端口范围。`/healthz` 验证的是 HTTPS 目录和协议版本。TURN 在服务器内网可响应时，还要核对公网入口、云安全组和回程。会话统计出现所选传输路径并开始解码帧后，才算跑通媒体链路。
+
 ## 客户端接入与维护
 
 1. 被控电脑在「设置 → 连接」启用自托管，填写域名和 HTTPS 端口。主控桌面使用同一地址，浏览器或移动端打开同一 HTTPS 服务。
