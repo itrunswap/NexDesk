@@ -1,3 +1,8 @@
 # The pinned Windows WebRTC archive uses the static MSVC runtime (/MT).
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# LiveKit's static WebRTC archive includes Objective-C categories used by its
+# codec factories. Apple ld needs -ObjC to load those category implementations.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-ObjC"]

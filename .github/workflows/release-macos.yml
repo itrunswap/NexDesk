@@ -99,6 +99,31 @@ jobs:
         if: ${{ !inputs.verify_download }}
         run: NEXDESK_SOURCE_ROOT="$GITHUB_WORKSPACE/source" bash packaging/tools/release/package-macos.sh
 
+      - name: Verify managed receiver in the signed bundle
+        if: ${{ !inputs.verify_download }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d "$RUNNER_TEMP/nexdesk-keychain.XXXXXX")
+          keychain="$work/receiver.keychain-db"
+          previous=$(security default-keychain -d user 2>/dev/null | tr -d '"' | sed 's/^ *//') || previous=
+          cleanup() {
+            if [[ -n $previous ]]; then
+              security default-keychain -d user -s "$previous"
+            fi
+            if [[ -f $keychain ]]; then
+              security delete-keychain "$keychain"
+            fi
+            rmdir "$work" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          unset password
+          security default-keychain -d user -s "$keychain"
+          python3 packaging/tools/release/check-macos-runtime.py \
+            source/apps/desktop/build/macos/Build/Products/Release/NexDesk.app
+
       - name: Save verified archive
         if: ${{ !inputs.verify_download }}
         uses: actions/upload-artifact@v4
