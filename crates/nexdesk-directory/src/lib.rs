@@ -137,9 +137,19 @@ pub fn valid_ice_url(value: &str) -> bool {
             .bytes()
             .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
         && value.split_once(':').is_some_and(|(scheme, endpoint)| {
-            matches!(scheme, "stun" | "stuns" | "turn" | "turns")
-                && !endpoint.is_empty()
-                && !endpoint.contains(['/', '@', '#', '\\'])
+            if endpoint.contains(['/', '@', '#', '\\', ',']) {
+                return false;
+            }
+            match endpoint.split_once('?') {
+                Some((address, query)) => {
+                    matches!(scheme, "turn" | "turns")
+                        && !address.is_empty()
+                        && matches!(query, "transport=udp" | "transport=tcp")
+                }
+                None => {
+                    matches!(scheme, "stun" | "stuns" | "turn" | "turns") && !endpoint.is_empty()
+                }
+            }
         })
 }
 
@@ -385,4 +395,20 @@ async fn read_json<R: DeserializeOwned>(
         bytes.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&bytes).map_err(|_| DirectoryError::InvalidResponse)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_ice_url;
+
+    #[test]
+    fn each_ice_entry_has_one_transport() {
+        assert!(valid_ice_url("stun:relay.example.test:3478"));
+        assert!(valid_ice_url("turn:relay.example.test:3478?transport=udp"));
+        assert!(valid_ice_url("turns:[2001:db8::1]:5349?transport=tcp"));
+        assert!(!valid_ice_url(
+            "turn:relay.example.test:3478?transport=udp,turn:relay.example.test:3478?transport=tcp",
+        ));
+        assert!(!valid_ice_url("turn:relay.example.test?transport=invalid"));
+    }
 }

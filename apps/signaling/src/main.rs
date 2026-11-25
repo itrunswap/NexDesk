@@ -112,7 +112,11 @@ impl IcePolicy {
     fn read() -> Result<Self, io::Error> {
         fn urls(name: &str, kinds: &[&str]) -> Result<Vec<String>, io::Error> {
             let raw = env::var(name).unwrap_or_default();
-            let values: Vec<String> = raw.split_whitespace().map(str::to_owned).collect();
+            let values: Vec<String> = raw
+                .split(|character: char| character.is_whitespace() || character == ',')
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect();
             if values.len() > 4
                 || values.iter().any(|value| {
                     !valid_ice_url(value)
