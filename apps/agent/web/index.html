@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NexDesk · 本机画面预览</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font: 16px/1.55 system-ui, sans-serif;
+      }
+      body { margin: 0; background: light-dark(#edf4f4, #152024); }
+      main { max-width: 960px; margin: 32px auto; padding: 0 20px; }
+      h1 { font-size: 1.5rem; margin: 0 0 12px; }
+      button { padding: 8px 16px; min-height: 42px; border: 0; border-radius: 8px; background: #17666d; color: #fff; font: inherit; }
+      button:disabled { opacity: .55; }
+      video { display: block; width: 100%; aspect-ratio: 16 / 9; margin: 16px 0; border-radius: 8px; background: #111c21; }
+      p, output { display: block; margin: 8px 0; overflow-wrap: anywhere; }
+    </style>
+    <script type="module" src="/viewer.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>NexDesk 本机画面预览</h1>
+      <button id="connect" type="button" disabled>开始观看</button>
+      <button id="audio" type="button" disabled>播放声音</button>
+      <button id="disconnect" type="button" disabled>结束观看</button>
+      <p id="status" role="status">正在检查邀请…</p>
+      <video id="picture" playsinline muted autoplay aria-label="远程视频"></video>
+      <output id="metrics" aria-label="媒体统计"></output>
+    </main>
+  </body>
+</html>

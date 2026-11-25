@@ -1,0 +1,52 @@
+[workspace]
+members = [
+    "apps/agent",
+    "apps/cli",
+    "apps/signaling",
+    "apps/web/wasm",
+    "crates/nexdesk-core",
+    "crates/nexdesk-directory",
+    "crates/nexdesk-ffi",
+    "crates/nexdesk-files",
+    "crates/nexdesk-media",
+    "crates/nexdesk-platform",
+    "crates/nexdesk-session",
+    "crates/nexdesk-store",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[workspace.dependencies]
+nexdesk-core = { path = "crates/nexdesk-core" }
+nexdesk-directory = { path = "crates/nexdesk-directory" }
+nexdesk-files = { path = "crates/nexdesk-files" }
+nexdesk-media = { path = "crates/nexdesk-media" }
+nexdesk-platform = { path = "crates/nexdesk-platform" }
+nexdesk-session = { path = "crates/nexdesk-session" }
+nexdesk-store = { path = "crates/nexdesk-store" }
+argon2 = "0.5.3"
+axum = "0.8.9"
+base64 = "0.22.1"
+libwebrtc = "=0.4.2"
+opaque-ke = { version = "=4.0.1", default-features = false, features = ["ristretto255", "argon2"] }
+prost = "0.14.3"
+rand = { version = "0.8", default-features = false, features = ["getrandom"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+ring = "0.17.14"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10.9"
+thiserror = "2"
+tokio = { version = "1.52.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "=0.29.0", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3.32", features = ["sink"] }
+zeroize = "1.8.2"
+windows-sys = "0.61.2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

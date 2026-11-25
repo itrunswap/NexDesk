@@ -1,0 +1,30 @@
+[package]
+name = "nexdesk-store"
+description = "Local NexDesk LAN settings, history, identity and system credentials"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+directories = "6.0.0"
+nexdesk-core.workspace = true
+nexdesk-directory.workspace = true
+nexdesk-platform.workspace = true
+nexdesk-session.workspace = true
+rusqlite = { version = "=0.37.0", features = ["bundled"] }
+serde.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "=3.6.3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "=3.6.3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
+[lints]
+workspace = true

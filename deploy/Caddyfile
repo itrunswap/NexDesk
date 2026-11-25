@@ -1,0 +1,10 @@
+{
+	auto_https disable_redirects
+}
+
+https://{$NEXDESK_HOST} {
+	tls internal
+	reverse_proxy directory:54000 {
+		header_up X-NexDesk-Source {remote_host}
+	}
+}

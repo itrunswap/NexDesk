@@ -1,0 +1,25 @@
+[package]
+name = "nexdesk-media"
+description = "NexDesk media, capture and frame delivery through native WebRTC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cxx = "1.0.198"
+libwebrtc.workspace = true
+nexdesk-core.workspace = true
+nexdesk-platform.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream = "0.1.17"
+webrtc-sys = "=0.3.55"
+
+[build-dependencies]
+cc = "1.11.3"
+pkg-config = "0.3.34"
+
+[lints]
+workspace = true

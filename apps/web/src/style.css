@@ -1,0 +1,592 @@
+:root {
+  font-family: system-ui, "Microsoft YaHei UI", sans-serif;
+  color: var(--ink);
+  background: var(--canvas);
+  color-scheme: light;
+  line-height: 1.5;
+  --canvas: #f3f5fa;
+  --panel: #fff;
+  --field: #edf1f8;
+  --edge: #d3dcea;
+  --ink: #161b29;
+  --muted: #526079;
+  --accent: #294ed8;
+  --selected: #e4ebff;
+  --hover: #f0f4ff;
+  --danger: #9d2637;
+  --scrim: #131d36a3;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --canvas: #121620;
+    --panel: #1a1f2c;
+    --field: #222b3d;
+    --edge: #354158;
+    --ink: #edf1fa;
+    --muted: #aab6cd;
+    --accent: #9db3ff;
+    --selected: #283a70;
+    --hover: #222e4a;
+    --danger: #ffb2bc;
+    --scrim: #080c17c9;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-size: 14px;
+}
+
+.shell {
+  max-width: 822px;
+  margin-inline: auto;
+  padding: 17px 18px 22px;
+}
+
+.shell.shell-session {
+  max-width: none;
+  padding: 0;
+}
+
+.brandbar,
+.brandbar h1 {
+  display: flex;
+  align-items: center;
+}
+
+.brandbar {
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.brandbar h1 {
+  gap: 9px;
+  margin: 0;
+  font-size: 21px;
+  letter-spacing: -0.02em;
+}
+
+.desk-mark {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+  background: #182544;
+}
+
+.desk-mark::before,
+.desk-mark::after {
+  position: absolute;
+  content: "";
+}
+
+.desk-mark::before {
+  inset: 9px 8px 12px;
+  border: 1.5px solid #ced9ff;
+  border-radius: 2px;
+}
+
+.desk-mark::after {
+  bottom: 8px;
+  left: 12px;
+  width: 10px;
+  height: 4px;
+  background:
+    linear-gradient(#ced9ff, #ced9ff) center top / 1.5px 100% no-repeat,
+    linear-gradient(#ced9ff, #ced9ff) left bottom / 100% 1.5px no-repeat;
+}
+
+.edition,
+.service-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.connection-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.connection-info,
+.connect,
+.dialog,
+.settings,
+.files section {
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  padding: 15px;
+  background: var(--panel);
+}
+
+.connection-info p {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  max-width: 38ch;
+}
+
+.service-address {
+  display: grid;
+  gap: 3px;
+  margin-top: 14px;
+  border: 1px solid var(--edge);
+  border-radius: 7px;
+  padding: 10px 11px;
+  background: var(--field);
+}
+
+.service-address strong {
+  overflow-wrap: anywhere;
+}
+
+.connect {
+  display: grid;
+  align-content: start;
+  gap: 11px;
+}
+
+.connect > label:not(.check) {
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--muted);
+}
+
+.connect input:not([type="checkbox"]) {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding-inline: 11px;
+  font-size: 14px;
+  font-weight: 400;
+  background: var(--field);
+}
+
+.connect-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+}
+
+.permission-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  gap: 5px 10px;
+  padding-block: 8px;
+}
+
+.check,
+.bar {
+  display: flex;
+  align-items: center;
+}
+
+.check {
+  gap: 7px;
+}
+
+.bar {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.connect-actions > :first-child {
+  flex: 1;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+input::placeholder {
+  color: var(--muted);
+}
+
+input[type="checkbox"],
+input[type="range"] {
+  accent-color: var(--accent);
+}
+
+input:not([type="checkbox"], [type="range"], [type="file"]),
+select,
+button {
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--edge);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--panel);
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover:enabled {
+  border-color: var(--accent);
+  background: var(--hover);
+}
+
+button:disabled {
+  opacity: 0.52;
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button.primary {
+  min-height: 40px;
+  background: #294ed8;
+  color: #fff;
+  border-color: transparent;
+  font-weight: 700;
+}
+
+button.primary:hover:enabled {
+  background: #2243bf;
+  border-color: transparent;
+}
+
+button.primary:active:enabled {
+  background: #18359f;
+}
+
+button.end {
+  color: var(--danger);
+}
+
+button[aria-pressed="true"] {
+  background: var(--selected);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+output {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.scrim {
+  position: fixed;
+  z-index: 2;
+  inset: 0;
+  background: var(--scrim);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+.dialog {
+  max-width: 440px;
+  box-shadow: 0 12px 36px #080c1726;
+}
+
+.dialog p {
+  color: var(--muted);
+}
+
+.connection-permissions {
+  width: min(100%, 440px);
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+}
+
+.connection-permissions > label {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+}
+
+.dialog code {
+  display: block;
+  overflow-wrap: anywhere;
+  margin: 0 0 14px;
+  padding: 9px;
+  border-radius: 6px;
+  background: var(--field);
+}
+
+.dialog .bar {
+  justify-content: end;
+}
+
+.workspace {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  background: #090d14;
+}
+
+.workspace:fullscreen {
+  height: 100%;
+}
+
+.workspace-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.workspace-aux {
+  flex: none;
+  max-height: 45vh;
+  max-height: 45dvh;
+  overflow: auto;
+  padding: 8px;
+  border-top: 1px solid var(--edge);
+  background: var(--canvas);
+}
+
+.workspace-aux > * + * {
+  margin-top: 8px;
+}
+
+.session-shield {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+}
+
+.session-tools {
+  position: absolute;
+  z-index: 3;
+  top: max(10px, env(safe-area-inset-top));
+  right: max(10px, env(safe-area-inset-right));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+button.session-trigger {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  place-items: center;
+  border-radius: 9px;
+  box-shadow: 0 2px 10px #0a142d4d;
+  font-size: 24px;
+  line-height: 1;
+}
+
+button.session-trigger[aria-expanded="true"] {
+  color: #fff;
+  border-color: #294ed8;
+  background: #294ed8;
+}
+
+.session-menu {
+  width: min(398px, calc(100vw - 24px));
+  max-height: calc(100vh - 72px);
+  max-height: calc(100dvh - max(72px, env(safe-area-inset-top) + 62px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 9px 28px #080e2352;
+}
+
+.session-menu > * + *,
+.session-options > * + * {
+  margin-top: 9px;
+}
+
+.session-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--edge);
+}
+
+.session-heading .state {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.session-menu label,
+.session-menu select {
+  max-width: 100%;
+}
+
+.session-options {
+  border-top: 1px solid var(--edge);
+  padding-top: 9px;
+}
+
+.session-surface-controls:empty {
+  display: none;
+}
+
+.session-notice {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  max-width: calc(100% - 20px);
+  padding: 5px 8px;
+  border: 1px solid var(--edge);
+  border-radius: 7px;
+  background: var(--panel);
+  pointer-events: none;
+}
+
+.viewport {
+  height: 100%;
+  overflow: auto;
+}
+
+.surface {
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.surface:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.surface video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+.settings > * + * {
+  margin-top: 10px;
+}
+
+.files {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.files section {
+  min-height: 150px;
+  max-height: 32vh;
+  overflow: auto;
+}
+
+.file-status {
+  grid-column: 1 / -1;
+}
+
+.entry {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  border-top: 1px solid var(--edge);
+}
+
+.entry span {
+  overflow-wrap: anywhere;
+}
+
+.embedded-client .connection-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.embedded-client:not(.shell-session) {
+  max-width: 500px;
+}
+
+.mobile-client button,
+.mobile-client input:not([type="checkbox"], [type="range"]),
+.mobile-client select {
+  min-height: 44px;
+}
+
+.mobile-client .connect input:not([type="checkbox"]) {
+  font-size: 16px;
+}
+
+.mobile-client .check {
+  min-height: 28px;
+}
+
+.touch-surface {
+  position: relative;
+  overflow: hidden;
+}
+
+.touch-surface video {
+  pointer-events: none;
+}
+
+.touch-cursor {
+  position: absolute;
+  width: 13px;
+  height: 13px;
+  transform: translate(-50%, -50%);
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #0a1827;
+  pointer-events: none;
+}
+
+.input-method label {
+  flex: 1 1 180px;
+}
+
+.input-method input {
+  display: block;
+  width: 100%;
+}
+
+@media (max-width: 630px) {
+  .shell {
+    padding: 12px max(12px, env(safe-area-inset-right)) 16px
+      max(12px, env(safe-area-inset-left));
+  }
+
+  .connection-grid,
+  .files {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .connection-info {
+    order: 1;
+  }
+}

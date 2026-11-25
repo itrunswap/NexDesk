@@ -1,0 +1,22 @@
+[Unit]
+Description=NexDesk device directory and browser client
+After=network.target
+
+[Service]
+Type=simple
+User=nexdesk
+Group=nexdesk
+ExecStart=/opt/nexdesk/current/bin/nexdesk-signaling
+EnvironmentFile=/etc/nexdesk/signaling.env
+StateDirectory=nexdesk
+StateDirectoryMode=0750
+UMask=0077
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

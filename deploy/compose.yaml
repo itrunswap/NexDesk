@@ -1,0 +1,71 @@
+services:
+  directory:
+    image: nexdesk-directory:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      NEXDESK_SIGNAL_ORIGIN: ${NEXDESK_SIGNAL_ORIGIN:-https://${NEXDESK_HOST:?set NEXDESK_HOST}}
+      NEXDESK_TRUSTED_PROXY: 172.30.88.2
+      NEXDESK_ENROLLMENT_KEY: ${NEXDESK_ENROLLMENT_KEY:-}
+      NEXDESK_STUN_URLS: ${NEXDESK_STUN_URLS:-}
+      NEXDESK_TURN_URLS: ${NEXDESK_TURN_URLS:-}
+      NEXDESK_TURN_SECRET: ${NEXDESK_TURN_SECRET:-}
+      NEXDESK_ICE_RELAY_ONLY: ${NEXDESK_ICE_RELAY_ONLY:-0}
+      NEXDESK_METRICS_LISTEN: ${NEXDESK_METRICS_LISTEN:-127.0.0.1:54001}
+    read_only: true
+    volumes:
+      - directory-data:/var/lib/nexdesk
+    networks:
+      - application
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:54000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+  https:
+    image: caddy:2.11.9-alpine
+    restart: unless-stopped
+    environment:
+      NEXDESK_HOST: ${NEXDESK_HOST:?set NEXDESK_HOST}
+    ports:
+      - "${NEXDESK_HTTPS_BIND:-0.0.0.0}:${NEXDESK_HTTPS_PORT:-443}:443"
+    volumes:
+      - ${NEXDESK_CADDYFILE:-./Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      application:
+        ipv4_address: 172.30.88.2
+    depends_on:
+      directory:
+        condition: service_healthy
+  turn:
+    image: coturn/coturn:4.19.2-r0-debian
+    profiles: [turn]
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      NEXDESK_HOST: ${NEXDESK_HOST:?set NEXDESK_HOST}
+      NEXDESK_TURN_SECRET: ${NEXDESK_TURN_SECRET:-}
+      NEXDESK_TURN_BIND_IP: ${NEXDESK_TURN_BIND_IP:-}
+      NEXDESK_TURN_EXTERNAL_IP: ${NEXDESK_TURN_EXTERNAL_IP:-}
+      NEXDESK_TURN_METRICS: ${NEXDESK_TURN_METRICS:-0}
+    entrypoint: ["/bin/sh", "/etc/nexdesk/turn-entrypoint.sh"]
+    volumes:
+      - ./turnserver.conf:/etc/nexdesk/turnserver.conf:ro
+      - ./turn-entrypoint.sh:/etc/nexdesk/turn-entrypoint.sh:ro
+    tmpfs:
+      - /tmp
+
+networks:
+  application:
+    ipam:
+      config:
+        - subnet: 172.30.88.0/24
+
+volumes:
+  directory-data:
+  caddy-data:
+  caddy-config:

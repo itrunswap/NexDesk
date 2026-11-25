@@ -1,0 +1,21 @@
+[package]
+name = "nexdesk-signaling"
+description = "Self-hosted NexDesk directory and encrypted signaling relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum = { workspace = true, features = ["ws"] }
+base64.workspace = true
+nexdesk-core.workspace = true
+nexdesk-directory.workspace = true
+ring.workspace = true
+rusqlite = { version = "=0.37.0", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

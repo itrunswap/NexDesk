@@ -1,0 +1,62 @@
+name: Package macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example, v0.1.3)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Verify release version
+        env:
+          NEXDESK_TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          version=$(awk '$1 == "version:" { split($2, parts, "+"); print parts[1] }' apps/desktop/pubspec.yaml)
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && $NEXDESK_TAG == "v$version" ]]
+          printf 'NEXDESK_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+
+      - name: Set up Rust and Flutter
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup override set 1.96.0
+          git clone --depth 1 --branch 3.47.0 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" --suppress-analytics --no-version-check precache --macos
+
+      - name: Build and verify archive
+        run: bash tools/release/package-macos.sh
+
+      - name: Attach archive to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXDESK_TAG: ${{ inputs.tag }}
+          NEXDESK_ARCH: ${{ matrix.arch }}
+        run: |
+          archive="target/release-$NEXDESK_VERSION/NexDesk-$NEXDESK_VERSION-Desktop-macOS-$NEXDESK_ARCH.zip"
+          gh release upload "$NEXDESK_TAG" "$archive" "$archive.sha256" --repo "$GITHUB_REPOSITORY" --clobber

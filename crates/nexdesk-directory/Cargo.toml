@@ -1,0 +1,18 @@
+[package]
+name = "nexdesk-directory"
+description = "NexDesk device-directory protocol and client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+nexdesk-core.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

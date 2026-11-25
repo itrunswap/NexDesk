@@ -1,0 +1,10 @@
+[package]
+name = "nexdesk-core"
+description = "Shared NexDesk connection types and validation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
