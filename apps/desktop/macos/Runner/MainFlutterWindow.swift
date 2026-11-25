@@ -204,7 +204,7 @@ private final class RemoteTextureChannel {
     reset()
   }
 
-  private func handle(_ call: FlutterMethodCall, _ result: FlutterResult) {
+  private func handle(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
     if call.method == "fullscreen" {
       guard let target = call.arguments as? Bool, let window else {
         result(FlutterError(code: "window_mode_unavailable", message: nil, details: nil))

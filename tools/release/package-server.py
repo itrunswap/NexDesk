@@ -63,21 +63,26 @@ def package(binary):
             check=True,
         )
         files[notice.name] = notice
-        archive = Path(temporary) / output.name
-        if suffix == ".zip":
-            with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED) as bundle:
-                for name, path in files.items():
-                    bundle.write(path, name)
-        else:
-            with tarfile.open(archive, "x:gz") as bundle:
-                for name, path in files.items():
-                    info = bundle.gettarinfo(str(path), name)
-                    info.uid = info.gid = 0
-                    info.uname = info.gname = "root"
-                    info.mode = 0o755 if name == entry or name.endswith(".sh") else 0o644
-                    with path.open("rb") as source:
-                        bundle.addfile(info, source)
-        archive.rename(output)
+        pending = tempfile.NamedTemporaryFile(dir=output.parent, prefix=".nexdesk-", delete=False)
+        archive = Path(pending.name)
+        try:
+            with pending:
+                if suffix == ".zip":
+                    with zipfile.ZipFile(pending, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+                        for name, path in files.items():
+                            bundle.write(path, name)
+                else:
+                    with tarfile.open(fileobj=pending, mode="w:gz") as bundle:
+                        for name, path in files.items():
+                            info = bundle.gettarinfo(str(path), name)
+                            info.uid = info.gid = 0
+                            info.uname = info.gname = "root"
+                            info.mode = 0o755 if name == entry or name.endswith(".sh") else 0o644
+                            with path.open("rb") as source:
+                                bundle.addfile(info, source)
+            archive.rename(output)
+        finally:
+            archive.unlink(missing_ok=True)
     return output
 
 

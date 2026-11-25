@@ -1,6 +1,6 @@
 # 各端运行与打包
 
-在仓库根目录运行各段命令，或按示例切换到对应子目录。通过 `git checkout v0.1.3` 可以使用首版发行源码。桌面和移动版本取自 `apps/desktop/pubspec.yaml`，目录协议版本通过 `/healthz` 查看。
+在仓库根目录运行各段命令，或按示例切换到对应子目录。通过 `git checkout v0.1.4` 可使用对应的发行源码。桌面和移动版本取自 `apps/desktop/pubspec.yaml`，目录协议版本通过 `/healthz` 查看。
 
 | 工具 | 版本与用途 |
 | --- | --- |
@@ -78,7 +78,7 @@ tar -czf target/NexDesk-Desktop-Linux-x64.tar.gz -C "$bundle" \
     nexdesk_desktop nexdesk-agent nexdesk-cli libnexdesk_ffi.so lib data
 ```
 
-运行 `"$bundle/nexdesk_desktop"`，在图形用户会话中启动。使用 PulseAudio 或 PipeWire 的 PulseAudio 兼容服务支持系统声音。准备打包到更旧的发行版时，在相同或更早的目标系统上构建并校验 glibc 与 GTK 依赖。被控功能受显示服务器和会话权限影响。
+在图形用户会话中运行 `"$bundle/nexdesk_desktop"`。发行包需要 GTK 3、PulseAudio 客户端库和 X11 运行库。在 Ubuntu 可按发行版安装 `libgtk-3-0t64`（旧版为 `libgtk-3-0`）、`libpulse0`、`libx11-6`、`libxext6`、`libxrandr2` 和 `libxtst6`。用 `ldd ./nexdesk_desktop` 和 `ldd ./nexdesk-cli` 核对缺少的动态库。PulseAudio 或 PipeWire 的 PulseAudio 兼容服务提供系统声音。准备打包到更旧的发行版时，在相同或更早的系统上构建并校验 glibc 与 GTK 依赖。
 
 ## Android
 

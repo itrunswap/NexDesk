@@ -40,15 +40,16 @@ curl -fsS https://desk.example.com/healthz
 
 ## Linux Nginx 与 systemd
 
-适用于已有 Nginx 的服务器。下载并校验 `NexDesk-0.1.3-SelfHost-Linux-x64.tar.gz`，把压缩包放到当前目录。以下命令适用于 Debian/Ubuntu 上的首次部署。已有同名服务、目录或 Nginx 站点时，在复制前核对现有配置。
+适用于已有 Nginx 的服务器。下载并校验对应版本的 `NexDesk-<版本号>-SelfHost-Linux-x64.tar.gz`，放到当前目录。以下命令适用于 Debian/Ubuntu 上的首次部署。已有同名服务、目录或 Nginx 站点时，在复制前核对现有配置。
 
 ```sh
+version=0.1.4
 sudo apt-get install nginx certbot
 getent passwd nexdesk >/dev/null || sudo useradd --system --no-create-home --user-group --shell /usr/sbin/nologin nexdesk
-sudo install -d -m 755 /opt/nexdesk/releases/0.1.3 /var/lib/nexdesk-acme
+sudo install -d -m 755 "/opt/nexdesk/releases/$version" /var/lib/nexdesk-acme
 sudo install -d -m 750 /etc/nexdesk
-sudo tar -xzf NexDesk-0.1.3-SelfHost-Linux-x64.tar.gz -C /opt/nexdesk/releases/0.1.3
-sudo ln -s /opt/nexdesk/releases/0.1.3 /opt/nexdesk/current
+sudo tar -xzf "NexDesk-$version-SelfHost-Linux-x64.tar.gz" -C "/opt/nexdesk/releases/$version"
+sudo ln -s "/opt/nexdesk/releases/$version" /opt/nexdesk/current
 sudo install -m 644 /opt/nexdesk/current/nginx/nexdesk-signaling.service /etc/systemd/system/
 sudo install -m 600 /dev/null /etc/nexdesk/signaling.env
 sudoedit /etc/nexdesk/signaling.env
