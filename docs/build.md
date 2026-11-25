@@ -56,6 +56,8 @@ bash tools/release/package-macos.sh
 
 输出在 `target/release-<版本号>/`，包括 `NexDesk.app` 的 ZIP 和独立 SHA-256 文件。首次作为被控端使用时，在「系统设置 → 隐私与安全性」授予屏幕录制和辅助功能权限。GitHub 预览包使用 ad hoc 签名，Gatekeeper 可能要求到「隐私与安全性」确认打开。用于正式分发时设置 `NEXDESK_MACOS_SIGN_IDENTITY` 和 `NEXDESK_NOTARY_PROFILE` 再执行同一脚本，完成 Developer ID 签名、公证和 stapling。[Apple 的应用打开说明](https://support.apple.com/102445)
 
+GitHub Actions 使用发行标签中的应用源码和本次工作流所在提交的打包脚本。手动构建 `v0.1.4` 时，可在标签工作目录中执行 `git show origin/main:tools/release/package-macos.sh | NEXDESK_SOURCE_ROOT="$PWD" bash`，以使用修正后的架构校验脚本。
+
 ## Linux
 
 在 x86_64 Linux 上安装 GTK 3、Ninja、CMake、pkg-config、C/C++ 工具链、X11 和 PulseAudio 开发库。以下包名适用于 Ubuntu。在构建前从发行版或 LLVM 软件源安装可用的 Clang 21 或更新版本。预构建 WebRTC SDK 需要支持 Chromium libc++ 头文件的编译器。

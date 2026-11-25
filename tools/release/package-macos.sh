@@ -12,7 +12,7 @@ case $(uname -m) in
     *) printf '%s\n' 'Unsupported macOS architecture.' >&2; exit 2 ;;
 esac
 
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+root=$(cd "${NEXDESK_SOURCE_ROOT:-$(dirname "${BASH_SOURCE[0]}")/../..}" && pwd)
 cd "$root"
 version=$(awk '$1 == "version:" { split($2, parts, "+"); print parts[1] }' apps/desktop/pubspec.yaml)
 if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -50,7 +50,7 @@ for name in nexdesk-agent nexdesk-cli libnexdesk_ffi.dylib; do
     install -m 755 "$native/$name" "$app/Contents/MacOS/$name"
 done
 for name in NexDesk nexdesk-agent nexdesk-cli libnexdesk_ffi.dylib; do
-    lipo -verify_arch "$architecture" "$app/Contents/MacOS/$name"
+    lipo "$app/Contents/MacOS/$name" -verify_arch "$architecture"
 done
 "$app/Contents/MacOS/nexdesk-cli" check-id 012345678
 
