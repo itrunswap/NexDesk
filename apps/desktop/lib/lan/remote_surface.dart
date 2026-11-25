@@ -8,10 +8,20 @@ import 'native_desktop.dart';
 
 enum SurfaceScale { fit, original, enlarge }
 
+typedef DesktopActionSender = bool Function(
+  int viewer,
+  DesktopAction action, {
+  int generation,
+  int x,
+  int y,
+  int code,
+  bool down,
+});
+
 class RemoteSurface extends StatefulWidget {
   const RemoteSurface({
     super.key,
-    required this.native,
+    required this.send,
     required this.viewer,
     required this.texture,
     required this.focus,
@@ -22,7 +32,7 @@ class RemoteSurface extends StatefulWidget {
     this.scale = SurfaceScale.fit,
   });
 
-  final NativeDesktop native;
+  final DesktopActionSender send;
   final int viewer, texture, frameWidth, frameHeight, generation;
   final FocusNode focus;
   final bool canInput;
@@ -37,6 +47,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
   final _motion = Stopwatch()..start();
   int _buttons = 0;
   int _lastMove = -100;
+  Offset _wheelRemainder = Offset.zero;
   final _vertical = ScrollController();
   final _horizontal = ScrollController();
 
@@ -72,14 +83,15 @@ class _RemoteSurfaceState extends State<RemoteSurface>
 
   void _release() {
     _buttons = 0;
-    widget.native.send(widget.viewer, DesktopAction.release);
+    _wheelRemainder = Offset.zero;
+    widget.send(widget.viewer, DesktopAction.release);
   }
 
   KeyEventResult _key(FocusNode _, KeyEvent event) {
     if (!widget.canInput) return KeyEventResult.ignored;
     final usage = event.physicalKey.usbHidUsage;
     if (usage < 0x00070004 || usage > 0x000700e7) return KeyEventResult.ignored;
-    widget.native.send(
+    widget.send(
       widget.viewer,
       DesktopAction.key,
       generation: widget.generation,
@@ -107,7 +119,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
       for (var index = 0; index < 5; index++) {
         final bit = 1 << index;
         if (changed & bit != 0) {
-          widget.native.send(
+          widget.send(
             widget.viewer,
             DesktopAction.button,
             generation: widget.generation,
@@ -124,7 +136,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
     final now = _motion.elapsedMilliseconds;
     if (now - _lastMove < 12) return;
     _lastMove = now;
-    widget.native.send(
+    widget.send(
       widget.viewer,
       DesktopAction.move,
       generation: widget.generation,
@@ -133,25 +145,29 @@ class _RemoteSurfaceState extends State<RemoteSurface>
     );
   }
 
-  void _wheel(PointerSignalEvent event, Size size) {
-    if (!widget.canInput || event is! PointerScrollEvent || size.isEmpty) {
-      return;
-    }
-    final (x, y) = _point(event.localPosition, size);
-    widget.native.send(
+  void _wheel(Offset position, Offset delta, Size size) {
+    if (!widget.canInput || size.isEmpty || !delta.isFinite) return;
+    final units = Offset(delta.dx, -delta.dy) * 3 + _wheelRemainder;
+    final horizontal = units.dx.truncate();
+    final vertical = units.dy.truncate();
+    _wheelRemainder =
+        units - Offset(horizontal.toDouble(), vertical.toDouble());
+    if (horizontal == 0 && vertical == 0) return;
+
+    final (x, y) = _point(position, size);
+    widget.send(
       widget.viewer,
       DesktopAction.move,
       generation: widget.generation,
       x: x,
       y: y,
     );
-    int delta(double value) => (value * 3).round().clamp(-1200, 1200);
-    widget.native.send(
+    widget.send(
       widget.viewer,
       DesktopAction.wheel,
       generation: widget.generation,
-      x: delta(event.scrollDelta.dx),
-      y: delta(-event.scrollDelta.dy),
+      x: horizontal.clamp(-1200, 1200),
+      y: vertical.clamp(-1200, 1200),
     );
   }
 
@@ -216,9 +232,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
         if (!focused) _release();
       },
       child: MouseRegion(
-        cursor: widget.canInput
-            ? SystemMouseCursors.precise
-            : SystemMouseCursors.basic,
+        cursor: SystemMouseCursors.basic,
         onExit: (_) {
           if (_buttons != 0) _release();
         },
@@ -232,7 +246,16 @@ class _RemoteSurfaceState extends State<RemoteSurface>
           onPointerCancel: (_) => _release(),
           onPointerMove: (event) => _pointer(event, size),
           onPointerHover: (event) => _pointer(event, size),
-          onPointerSignal: (event) => _wheel(event, size),
+          onPointerSignal: (event) {
+            if (event is PointerScrollEvent) {
+              _wheel(event.localPosition, event.scrollDelta, size);
+            }
+          },
+          onPointerPanZoomUpdate: (event) {
+            if (event.scale == 1 && event.rotation == 0) {
+              _wheel(event.localPosition, -event.localPanDelta, size);
+            }
+          },
           child: Texture(textureId: widget.texture),
         ),
       ),

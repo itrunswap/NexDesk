@@ -352,7 +352,7 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
         ColoredBox(
           color: Colors.black,
           child: RemoteSurface(
-            native: widget.native,
+            send: widget.native.send,
             viewer: viewer,
             texture: texture,
             focus: _focus,

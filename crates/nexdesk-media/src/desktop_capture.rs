@@ -18,23 +18,49 @@ use crate::{CaptureRegion, MediaError, capture::valid_size};
 
 type CapturedFrame = (VideoFrame<NV12Buffer>, CaptureRegion);
 
-pub(crate) struct DesktopCapture(UniquePtr<DesktopCapturer>);
+pub(crate) struct DesktopCapture {
+    capturer: UniquePtr<DesktopCapturer>,
+    #[cfg(target_os = "macos")]
+    explicit_screen: bool,
+}
 
 impl DesktopCapture {
     pub(crate) fn new(source_type: SourceType, system_picker: bool) -> Result<Self, MediaError> {
-        let capture = new_desktop_capturer(DesktopCapturerOptions {
+        #[cfg(target_os = "macos")]
+        let explicit_screen = source_type == SourceType::Screen && !system_picker;
+        let capturer = new_desktop_capturer(DesktopCapturerOptions {
             source_type,
             include_cursor: true,
             allow_sck_system_picker: system_picker,
         });
-        if capture.is_null() {
+        if capturer.is_null() {
             return Err(MediaError::CaptureUnavailable);
         }
-        Ok(Self(capture))
+        Ok(Self {
+            capturer,
+            #[cfg(target_os = "macos")]
+            explicit_screen,
+        })
     }
 
-    pub(crate) fn sources(&self) -> Vec<Source> {
-        self.0.get_source_list()
+    pub(crate) fn sources(&self) -> Result<Vec<Source>, MediaError> {
+        let sources = self.capturer.get_source_list();
+        #[cfg(target_os = "macos")]
+        if self.explicit_screen && sources.is_empty() {
+            // WebRTC's ScreenCaptureKit capturer accepts display IDs but leaves
+            // its source list empty when the system picker is disabled.
+            let displays =
+                nexdesk_platform::capture_display_ids().ok_or(MediaError::CaptureUnavailable)?;
+            return Ok(displays
+                .into_iter()
+                .map(|id| Source {
+                    id: u64::from(id),
+                    title: String::new(),
+                    display_id: i64::from(id),
+                })
+                .collect());
+        }
+        Ok(sources)
     }
 
     pub(crate) fn start(
@@ -43,12 +69,12 @@ impl DesktopCapture {
         callback: impl FnMut(Result<CapturedFrame, CaptureError>) + Send + 'static,
     ) -> Result<(), MediaError> {
         if let Some(source) = source
-            && (!self.sources().iter().any(|entry| entry.id == source)
-                || !self.0.select_source(source))
+            && (!self.sources()?.iter().any(|entry| entry.id == source)
+                || !self.capturer.select_source(source))
         {
             return Err(MediaError::CaptureUnavailable);
         }
-        self.0
+        self.capturer
             .pin_mut()
             .start(Box::new(DesktopCapturerCallbackWrapper::new(Box::new(
                 FrameCallback(callback),
@@ -57,7 +83,7 @@ impl DesktopCapture {
     }
 
     pub(crate) fn capture_frame(&self) {
-        self.0.capture_frame();
+        self.capturer.capture_frame();
     }
 }
 

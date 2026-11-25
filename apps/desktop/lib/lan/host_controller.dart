@@ -16,8 +16,9 @@ final class HostRequest {
     this.displays,
     this.capabilities,
     this.directory,
-    this.controller,
-  );
+    this.controller, {
+    this.controlNotice,
+  });
   final int id;
   final String peer;
   final bool canControl;
@@ -25,6 +26,7 @@ final class HostRequest {
   final int capabilities;
   final bool directory;
   final String? controller;
+  final String? controlNotice;
 }
 
 final class HostSource {
@@ -523,18 +525,36 @@ final class HostController extends ChangeNotifier {
     }
   }
 
+  String _controlNotice(bool displays) {
+    if (!settings.permissions.incoming.control) {
+      return '请在「设置 → 权限」的「允许的权限上限」中开启键鼠控制。';
+    }
+    if (!displays) {
+      return '当前共享来源仅支持观看。可在「设置 → 共享」选择具体显示器后重新连接。';
+    }
+    return Platform.isMacOS
+        ? '键鼠输入暂不可用。请在 macOS「隐私与安全性 → 辅助功能」中检查 NexDesk 的权限。'
+        : '系统的键鼠输入暂不可用。';
+  }
+
   void _event(_HostProcess process, Map<String, Object?> event) {
     if (_disposed || !identical(process, _current)) return;
     switch (event['event']) {
       case 'request':
+        final requestedControl = event['request_input'] == true;
+        final canControl = requestedControl && event['can_input'] == true;
+        final displays = event['displays'] == true;
         request = HostRequest(
           event['request'] as int,
           event['peer'] as String,
-          event['request_input'] == true && event['can_input'] == true,
-          event['displays'] == true,
+          canControl,
+          displays,
           event['capabilities'] as int? ?? 0,
           event['mode'] == 'id',
           event['controller'] as String?,
+          controlNotice: requestedControl && !canControl
+              ? _controlNotice(displays)
+              : null,
         );
       case 'request_closed':
         if (request?.id == event['request']) request = null;

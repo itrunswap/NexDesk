@@ -61,7 +61,7 @@ pub struct CaptureSourceInfo {
 pub fn capture_sources(kind: CaptureKind) -> Result<Vec<CaptureSourceInfo>, MediaError> {
     let capturer = DesktopCapture::new(kind.into(), false)?;
     Ok(capturer
-        .sources()
+        .sources()?
         .into_iter()
         .map(|source| CaptureSourceInfo {
             id: source.id,

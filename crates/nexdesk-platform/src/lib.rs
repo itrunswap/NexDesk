@@ -17,6 +17,8 @@ pub use audio::{
 pub use clipboard::Clipboard;
 pub use display::{DisplayMode, Monitor};
 
+#[cfg(target_os = "macos")]
+pub use native::capture_display_ids;
 pub use native::{NativeInput, initialize, request_permissions, screen_region};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

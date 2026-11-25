@@ -28,11 +28,14 @@ struct Rect {
 unsafe extern "C" {
     fn CGDisplayBounds(display: u32) -> Rect;
     fn CGDisplayIsActive(display: u32) -> u32;
+    fn CGDisplayMirrorsDisplay(display: u32) -> u32;
+    fn CGGetActiveDisplayList(max_displays: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
     fn CGRequestPostEventAccess() -> bool;
     fn CGEventCreate(source: *const c_void) -> *mut c_void;
     fn CGEventGetLocation(event: *const c_void) -> Point;
+    fn CGEventSetLocation(event: *mut c_void, point: Point);
     fn CGEventCreateMouseEvent(
         source: *const c_void,
         kind: u32,
@@ -72,6 +75,29 @@ pub fn request_permissions() -> bool {
         let input = AXIsProcessTrusted() || CGRequestPostEventAccess();
         capture && input
     }
+}
+
+pub fn capture_display_ids() -> Option<Vec<u32>> {
+    let mut displays = [0; 32];
+    let mut count = 0;
+    // SAFETY: The query is read-only and both output buffers are valid for the call.
+    unsafe {
+        if !CGPreflightScreenCaptureAccess() {
+            return Some(Vec::new());
+        }
+        if CGGetActiveDisplayList(displays.len() as u32, displays.as_mut_ptr(), &mut count) != 0 {
+            return None;
+        }
+    }
+    Some(
+        displays
+            .get(..count as usize)?
+            .iter()
+            .copied()
+            // SAFETY: Each ID comes from the active-display list.
+            .filter(|&id| id != 0 && unsafe { CGDisplayMirrorsDisplay(id) } == 0)
+            .collect(),
+    )
 }
 
 pub fn screen_region(id: u64, platform_id: i64, _captured: Region) -> Option<Region> {
@@ -215,6 +241,9 @@ impl Injector for NativeInput {
         }
         // SAFETY: Event is retained until CoreGraphics has consumed the post call.
         unsafe {
+            if matches!(input, Input::Wheel { .. }) {
+                CGEventSetLocation(event.0.as_ptr(), self.point);
+            }
             CGEventSetFlags(event.0.as_ptr(), flags);
             CGEventPost(0, event.0.as_ptr());
         }

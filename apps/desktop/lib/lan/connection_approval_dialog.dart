@@ -68,6 +68,10 @@ class _ConnectionApprovalDialogState extends State<ConnectionApprovalDialog> {
               permissions.summary,
               style: Theme.of(context).textTheme.bodySmall,
             ),
+            if (request.controlNotice case final notice?) ...[
+              const SizedBox(height: 8),
+              Text(notice, style: Theme.of(context).textTheme.bodySmall),
+            ],
             if (request.controller != null)
               CheckboxListTile(
                 contentPadding: EdgeInsets.zero,
