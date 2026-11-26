@@ -259,7 +259,7 @@ final class HostController extends ChangeNotifier {
     if (_sourceFor(config) != _sourceFor(settings) ||
         config.shareRoot != settings.shareRoot ||
         !config.permissions.incoming.permits(settings.permissions.incoming) ||
-        unattendedSession && config.unattended != settings.unattended) {
+        unattendedSession && config.approvalPolicy != settings.approvalPolicy) {
       return true;
     }
     if (mode) {

@@ -44,7 +44,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       ? _initial.useSelfHosted
       : _historyOrigin != _defaultOrigin;
   late bool _lan = _initial.lanAllowed, _shell = _initial.allowShell;
-  late bool _unattended = _initial.unattended;
+  late ApprovalPolicy _approvalPolicy = _initial.approvalPolicy;
   late bool _deviceAuthorization = _initial.permissions.deviceAuthorization;
   late SessionPermissions _outgoing = _initial.permissions.outgoing;
   late SessionPermissions _incoming = _initial.permissions.incoming;
@@ -110,7 +110,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       source: _source,
       shareRoot: _shared.text.trim(),
       allowShell: _shell,
-      unattended: _unattended,
+      approvalPolicy: _approvalPolicy,
       downloadRoot: _downloads.text.trim(),
       quality: _quality,
       fps: _fps,
@@ -382,13 +382,15 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   List<Widget> _sharing() => [
     _heading('接入确认'),
-    SwitchListTile(
-      contentPadding: EdgeInsets.zero,
-      title: const Text('允许可信设备免确认连接'),
-      subtitle: const Text('首次信任后，30 天内按已批准的权限接入。被控电脑须已登录并运行 NexDesk。'),
-      value: _unattended,
-      onChanged: (value) => setState(() => _unattended = value),
+    _choice(
+      '接入方式',
+      _approvalPolicy.value,
+      {for (final policy in ApprovalPolicy.values) policy.value: policy.label},
+      (value) =>
+          setState(() => _approvalPolicy = ApprovalPolicy.fromValue(value)),
     ),
+    const SizedBox(height: 8),
+    Text(_approvalPolicy.description),
     ListTile(
       contentPadding: EdgeInsets.zero,
       title: const Text('管理可信设备'),

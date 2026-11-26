@@ -6,7 +6,7 @@ use nexdesk_session::{
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 
-use crate::{Store, StoreError, entry, read_secret};
+use crate::{ApprovalPolicy, Store, StoreError, entry, read_secret};
 
 const CONTROLLER_ACCOUNT: &str = "desktop-controller-ed25519-v1";
 const APPROVAL_DAYS: i64 = 30;
@@ -48,18 +48,6 @@ fn valid_scope(scope: &str) -> bool {
 }
 
 impl Store {
-    pub fn unattended_allowed(&self) -> Result<bool, StoreError> {
-        Ok(self
-            .db
-            .query_row(
-                "SELECT unattended FROM desktop_access_policy WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(false))
-    }
-
     pub fn trust_controller(
         &self,
         scope: &str,
@@ -78,7 +66,7 @@ impl Store {
         let applied = transaction.execute(
             "INSERT INTO trusted_controller (scope,identity,input,capabilities,expires_at)
              SELECT ?1,?2,?3,?4,unixepoch()+86400*?5
-             WHERE EXISTS(SELECT 1 FROM desktop_access_policy WHERE id=1 AND unattended=1)
+             WHERE EXISTS(SELECT 1 FROM desktop_access_policy WHERE id=1 AND unattended=?7)
                 AND (EXISTS(SELECT 1 FROM trusted_controller WHERE scope=?1 AND identity=?2)
                     OR (SELECT count(*) FROM trusted_controller) < ?6)
              ON CONFLICT(scope,identity) DO UPDATE SET input=excluded.input,
@@ -89,7 +77,8 @@ impl Store {
                 input,
                 capabilities.bits(),
                 APPROVAL_DAYS,
-                MAX_DEVICES
+                MAX_DEVICES,
+                ApprovalPolicy::TrustedDevices as u8,
             ],
         )?;
         if applied != 1 {
@@ -106,8 +95,8 @@ impl Store {
     ) -> Result<Option<(bool, Capabilities)>, StoreError> {
         let raw: Option<(bool, u32)> = self.db.query_row(
             "SELECT input,capabilities FROM trusted_controller WHERE scope=?1 AND identity=?2
-                AND expires_at>unixepoch() AND EXISTS(SELECT 1 FROM desktop_access_policy WHERE id=1 AND unattended=1)",
-            params![scope, identity.encoded()],
+                AND expires_at>unixepoch() AND EXISTS(SELECT 1 FROM desktop_access_policy WHERE id=1 AND unattended=?3)",
+            params![scope, identity.encoded(), ApprovalPolicy::TrustedDevices as u8],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?;
         Ok(raw.and_then(|(input, bits)| {

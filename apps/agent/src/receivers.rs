@@ -160,7 +160,7 @@ impl ManagedReceivers {
         }
         desktop.configure_shared(target, share);
         desktop.configure_permissions(settings.permissions);
-        desktop.configure_unattended(settings.unattended);
+        desktop.configure_approval(settings.approval_policy);
         if replace_lan && (listener.is_some() || address.is_none()) {
             self.lan = None;
             host.clear_challenges(false);

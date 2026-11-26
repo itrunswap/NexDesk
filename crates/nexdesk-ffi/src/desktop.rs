@@ -39,6 +39,7 @@ const UNSUPPORTED: u32 = 15;
 const CAPTURE_FAILED: u32 = 16;
 const MAX_OUTPUT: usize = 32 * 1024;
 const DEVICE_AUTHORIZATION: u32 = 8;
+const AUTO_CONFIRM_IDENTITY: u32 = 16;
 
 pub(crate) struct DesktopContext {
     actions: mpsc::Sender<Action>,
@@ -62,6 +63,7 @@ struct ConnectOptions {
     control: bool,
     capabilities: Option<Capabilities>,
     device_authorization: bool,
+    auto_confirm_identity: bool,
 }
 
 enum Target {
@@ -188,9 +190,6 @@ pub unsafe extern "C" fn nexdesk_m4_connect(request: *const u8, length: usize) -
     ) else {
         return 0;
     };
-    if options.flags & !15 != 0 {
-        return 0;
-    }
     start_viewer(
         Target::Directory(origin, device),
         options.code,
@@ -218,7 +217,9 @@ fn connect_viewer(
 }
 
 fn start_viewer(target: Target, code: &str, flags: u32, capabilities: Option<Capabilities>) -> u64 {
-    if flags & !15 != 0 || flags & DEVICE_AUTHORIZATION != 0 && capabilities.is_none() {
+    if flags & !(15 | AUTO_CONFIRM_IDENTITY) != 0
+        || flags & DEVICE_AUTHORIZATION != 0 && capabilities.is_none()
+    {
         return 0;
     }
     let manual = if code.is_empty() && flags & 4 != 0 {
@@ -236,6 +237,7 @@ fn start_viewer(target: Target, code: &str, flags: u32, capabilities: Option<Cap
         control: flags & 1 != 0,
         capabilities,
         device_authorization: flags & DEVICE_AUTHORIZATION != 0,
+        auto_confirm_identity: flags & AUTO_CONFIRM_IDENTITY != 0,
     };
     let (actions, receive_actions) = mpsc::channel(96);
     let (trusted, trust) = watch::channel(false);
@@ -411,11 +413,9 @@ async fn run(viewer: &Viewer, options: ConnectOptions, mut commands: Commands) -
     } else {
         None
     };
-    let pin = stored
-        .as_ref()
-        .ok()
-        .and_then(|store| options.target.pin(store).ok())
-        .flatten();
+    let saved_identity = stored.as_ref().ok().map(|store| options.target.pin(store));
+    let confirm_first = options.auto_confirm_identity && matches!(saved_identity, Some(Ok(None)));
+    let pin = saved_identity.and_then(Result::ok).flatten();
     let (code, mut pin) = if let Some(code) = options.code {
         (code, pin)
     } else {
@@ -455,7 +455,7 @@ async fn run(viewer: &Viewer, options: ConnectOptions, mut commands: Commands) -
                 if let Ok(mut info) = context.info.lock() {
                     info.identity = Some(identity.to_string());
                 }
-                if pin.is_some() {
+                if pin.is_some() || confirm_first {
                     return true;
                 }
                 viewer.set_status(VERIFY_IDENTITY);

@@ -8,6 +8,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::{HostPreferences, Store, StoreError};
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum ApprovalPolicy {
+    // Values 0 and 1 preserve the previous desktop_access_policy toggle.
+    #[default]
+    Manual = 0,
+    TrustedDevices = 1,
+    Password = 2,
+}
+
+fn read_approval_policy<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ApprovalPolicy, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SavedPolicy {
+        Policy(ApprovalPolicy),
+        Unattended(bool),
+    }
+    Ok(match SavedPolicy::deserialize(deserializer)? {
+        SavedPolicy::Policy(policy) => policy,
+        SavedPolicy::Unattended(true) => ApprovalPolicy::TrustedDevices,
+        SavedPolicy::Unattended(false) => ApprovalPolicy::Manual,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DesktopPermissions {
@@ -43,7 +70,8 @@ pub struct DesktopPreferences {
     pub source: String,
     pub share_root: String,
     pub allow_shell: bool,
-    pub unattended: bool,
+    #[serde(alias = "unattended", deserialize_with = "read_approval_policy")]
+    pub approval_policy: ApprovalPolicy,
     pub download_root: String,
     pub quality: String,
     pub fps: u16,
@@ -61,7 +89,7 @@ impl Default for DesktopPreferences {
             source: String::new(),
             share_root: String::new(),
             allow_shell: false,
-            unattended: false,
+            approval_policy: ApprovalPolicy::Manual,
             download_root: String::new(),
             quality: "auto".into(),
             fps: 30,
@@ -158,14 +186,14 @@ impl Store {
                         download_root: row.get(8)?,
                         quality: row.get(9)?,
                         fps: row.get(10)?,
-                        unattended: false,
+                        approval_policy: ApprovalPolicy::Manual,
                         permissions: DesktopPermissions::default(),
                     })
                 },
             )
             .optional()?;
         if let Some(mut settings) = settings {
-            settings.unattended = self.unattended_allowed()?;
+            settings.approval_policy = self.approval_policy()?;
             settings.permissions = self.desktop_permissions()?;
             return settings.validated();
         }
@@ -190,6 +218,24 @@ impl Store {
             ..DesktopPreferences::default()
         }
         .validated()
+    }
+
+    fn approval_policy(&self) -> Result<ApprovalPolicy, StoreError> {
+        let value: u8 = self
+            .db
+            .query_row(
+                "SELECT unattended FROM desktop_access_policy WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        match value {
+            0 => Ok(ApprovalPolicy::Manual),
+            1 => Ok(ApprovalPolicy::TrustedDevices),
+            2 => Ok(ApprovalPolicy::Password),
+            _ => Err(StoreError::Invalid),
+        }
     }
 
     fn desktop_permissions(&self) -> Result<DesktopPermissions, StoreError> {
@@ -253,7 +299,7 @@ impl Store {
         transaction.execute(
             "INSERT INTO desktop_access_policy (id,unattended) VALUES (1,?1)
              ON CONFLICT(id) DO UPDATE SET unattended=excluded.unattended",
-            [settings.unattended],
+            [settings.approval_policy as u8],
         )?;
         let permissions = settings.permissions;
         transaction.execute(
@@ -278,6 +324,39 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_policy_preserves_legacy_values_and_persists_password_mode() -> Result<(), StoreError>
+    {
+        let store = Store::open_at(Path::new(":memory:"))?;
+        store.save_desktop_preferences(DesktopPreferences::default())?;
+        for (value, expected) in [
+            (false, ApprovalPolicy::Manual),
+            (true, ApprovalPolicy::TrustedDevices),
+        ] {
+            let legacy = DesktopPreferences::deserialize(serde::de::value::MapDeserializer::<
+                _,
+                serde::de::value::Error,
+            >::new(
+                [("unattended", value)].into_iter()
+            ))
+            .unwrap();
+            assert_eq!(legacy.approval_policy, expected);
+            store
+                .db
+                .execute("UPDATE desktop_access_policy SET unattended=?1", [value])?;
+            assert_eq!(store.desktop_preferences()?.approval_policy, expected);
+        }
+        store.save_desktop_preferences(DesktopPreferences {
+            approval_policy: ApprovalPolicy::Password,
+            ..DesktopPreferences::default()
+        })?;
+        assert_eq!(
+            store.desktop_preferences()?.approval_policy,
+            ApprovalPolicy::Password
+        );
+        Ok(())
+    }
 
     #[test]
     fn preserves_legacy_profile_and_remembers_inactive_directory() -> Result<(), StoreError> {

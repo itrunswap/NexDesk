@@ -125,7 +125,7 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
       1 || 2 || 9 || 11 || 12 => null,
       3 => '会话已结束。',
       4 => '配对失败，请核对连接密码。',
-      5 => '设备指纹已变化。请在近期连接中移除此设备，再核对并重新配对。',
+      5 => '设备指纹已变化。请先核对被控电脑，再移除近期连接中的旧记录并重新连接。',
       6 =>
         widget.directoryOrigin == null
             ? '无法连接。请检查主机监听、地址和端口。'
@@ -580,7 +580,7 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
     2 when _info.notice == 'capture_unavailable' => '无法切换到该显示器',
     2 when _info.notice == 'input_unavailable' => '系统拒绝了键鼠权限，当前仅观看',
     2 => _info.canInput ? '已连接 · 可控制' : '已连接 · 仅观看',
-    9 => '等待被控端同意…',
+    9 => '等待被控端授权…',
     11 => '连接已中断，正在恢复…',
     12 => '等待确认设备身份',
     _ => '正在配对并协商媒体…',

@@ -238,13 +238,20 @@ class _HomeScreenState extends State<HomeScreen> {
     final settings = host?.settings ?? const DesktopSettings();
     setState(() => _prompting = true);
     try {
-      final password = await askConnectionPassword(
-        context,
-        target: label,
-        saved: saved,
-        offersCollaboration: desktop.collaboration != null,
-        permissions: settings.permissions,
-      );
+      final offersCollaboration = desktop.collaboration != null;
+      final password = saved
+          ? ConnectionPassword.request(
+              permissions: settings.permissions,
+              offersCollaboration: offersCollaboration,
+              stored: true,
+            )
+          : await askConnectionPassword(
+              context,
+              target: label,
+              saved: false,
+              offersCollaboration: offersCollaboration,
+              permissions: settings.permissions,
+            );
       if (!mounted || password == null) return;
       if (!byIp && origin != host?.directoryOrigin) {
         setState(() => _targetIssue = 'ID 服务已切换，请重新选择设备。');

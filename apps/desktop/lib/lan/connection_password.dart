@@ -13,6 +13,23 @@ final class ConnectionPassword {
     this.deviceAuthorization = false,
   });
 
+  factory ConnectionPassword.request({
+    required DesktopPermissions permissions,
+    required bool offersCollaboration,
+    String code = '',
+    bool remember = false,
+    bool stored = false,
+  }) => ConnectionPassword(
+    code: stored ? '' : code,
+    control: permissions.outgoing.control,
+    remember: remember || stored,
+    stored: stored,
+    capabilities: offersCollaboration
+        ? permissions.outgoing.effectiveCapabilities
+        : 0,
+    deviceAuthorization: offersCollaboration && permissions.deviceAuthorization,
+  );
+
   final String code;
   final bool control, remember, stored;
   final bool deviceAuthorization;
@@ -60,19 +77,14 @@ class _PasswordDialogState extends State<_PasswordDialog> {
 
   void _submit() {
     if (!_valid) return;
-    final permissions = widget.permissions;
     Navigator.pop(
       context,
-      ConnectionPassword(
-        code: _stored ? '' : _code.text,
-        control: permissions.outgoing.control,
-        remember: _remember || _stored,
+      ConnectionPassword.request(
+        permissions: widget.permissions,
+        offersCollaboration: widget.offersCollaboration,
+        code: _code.text,
+        remember: _remember,
         stored: _stored,
-        capabilities: widget.offersCollaboration
-            ? permissions.outgoing.effectiveCapabilities
-            : 0,
-        deviceAuthorization:
-            widget.offersCollaboration && permissions.deviceAuthorization,
       ),
     );
   }

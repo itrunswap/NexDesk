@@ -49,6 +49,8 @@ enum DesktopAction {
 }
 
 final class NativeDesktop {
+  static const _autoConfirmIdentity = 16;
+
   NativeDesktop._(this.preview, ffi.DynamicLibrary library)
     : collaboration = NativeCollaboration.tryLoad(library),
       _directory = _loadDirectory(library),
@@ -137,6 +139,7 @@ final class NativeDesktop {
           stored: password.stored,
           capabilities: password.capabilities,
           deviceAuthorization: password.deviceAuthorization,
+          autoConfirmIdentity: true,
         )
       : connectDirectory(
           origin,
@@ -147,6 +150,7 @@ final class NativeDesktop {
           stored: password.stored,
           capabilities: password.capabilities,
           deviceAuthorization: password.deviceAuthorization,
+          autoConfirmIdentity: true,
         );
 
   int connectDirectory(
@@ -158,6 +162,7 @@ final class NativeDesktop {
     required bool stored,
     required int capabilities,
     bool deviceAuthorization = false,
+    bool autoConfirmIdentity = false,
   }) {
     final connect = _directory;
     if (connect == null || (!stored && code.length != 6)) return 0;
@@ -170,7 +175,8 @@ final class NativeDesktop {
             (control ? 1 : 0) |
             (remember ? 2 : 0) |
             (stored ? 4 : 0) |
-            (deviceAuthorization ? 8 : 0),
+            (deviceAuthorization ? 8 : 0) |
+            (autoConfirmIdentity ? _autoConfirmIdentity : 0),
         'capabilities': capabilities,
       }),
     );
@@ -197,6 +203,7 @@ final class NativeDesktop {
     required bool stored,
     int? capabilities,
     bool deviceAuthorization = false,
+    bool autoConfirmIdentity = false,
   }) {
     final endpoint = utf8.encode(address);
     final secret = utf8.encode(code);
@@ -214,7 +221,8 @@ final class NativeDesktop {
               (control ? 1 : 0) |
               (remember ? 2 : 0) |
               (stored ? 4 : 0) |
-              (deviceAuthorization ? 8 : 0);
+              (deviceAuthorization ? 8 : 0) |
+              (autoConfirmIdentity ? _autoConfirmIdentity : 0);
           if (capabilities != null && collaboration != null) {
             return collaboration!.connect(
               _bytes(arena, endpoint),

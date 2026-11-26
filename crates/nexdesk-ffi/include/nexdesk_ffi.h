@@ -60,6 +60,8 @@ void nexdesk_m1_release_frame(const void *frame);
 
 /* M2 viewer IDs also use the status, disconnect and texture operations above.
  * flags: 1 requests control, 2 remembers the credential, 4 uses a stored credential.
+ * 16 accepts a password-authenticated host on first use when identity storage is available.
+ * An existing host identity is always verified. Flag 8 uses device authorization with M3/M4.
  * JSON outputs are UTF-8 and not NUL terminated. Zero means no output.
  */
 uint64_t nexdesk_m2_connect(const uint8_t *address, size_t address_len,

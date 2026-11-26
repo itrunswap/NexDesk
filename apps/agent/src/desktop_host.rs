@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -20,6 +20,7 @@ use nexdesk_session::{
     controller::ControllerIdentity,
     pairing::{AccessCode, HostPairing},
 };
+use nexdesk_store::ApprovalPolicy;
 use ring::{
     digest,
     rand::{SecureRandom, SystemRandom},
@@ -42,7 +43,7 @@ pub(crate) struct DesktopHost {
     share: watch::Sender<Option<Arc<Root>>>,
     permissions: watch::Sender<(bool, Capabilities)>,
     persistent: bool,
-    unattended: AtomicBool,
+    approval_policy: watch::Sender<ApprovalPolicy>,
     trust_changes: Arc<Mutex<()>>,
     slots: Arc<Semaphore>,
     next_request: AtomicU64,
@@ -72,14 +73,20 @@ pub(crate) struct Access {
     pub capabilities: Capabilities,
     pub files: Option<Arc<Mutex<TransferStore>>>,
     remote: Option<RemoteIdentity>,
-    unattended: bool,
+    approval: ApprovalPolicy,
+}
+
+impl Access {
+    fn permitted_by(&self, policy: ApprovalPolicy) -> bool {
+        self.approval == ApprovalPolicy::Manual || self.approval == policy
+    }
 }
 
 fn access(
     input: Grant,
     capabilities: Capabilities,
     remote: Option<RemoteIdentity>,
-    unattended: bool,
+    approval: ApprovalPolicy,
 ) -> Access {
     let capabilities = if input == Grant::Control {
         capabilities
@@ -93,7 +100,7 @@ fn access(
             .any_files()
             .then(|| Arc::new(Mutex::new(TransferStore::default()))),
         remote,
-        unattended,
+        approval,
     }
 }
 
@@ -182,7 +189,7 @@ impl DesktopHost {
             ))
             .0,
             persistent,
-            unattended: AtomicBool::new(false),
+            approval_policy: watch::channel(ApprovalPolicy::Manual).0,
             trust_changes: Arc::new(Mutex::new(())),
             slots: Arc::new(Semaphore::new(1)),
             next_request: AtomicU64::new(1),
@@ -263,6 +270,11 @@ impl DesktopHost {
         } = incoming;
         let (allow_control, allowed) = *self.permissions.borrow();
         let can_input = can_input && allow_control;
+        let grant = if request_input && can_input {
+            Grant::Control
+        } else {
+            Grant::View
+        };
         let capabilities = capabilities.intersection(allowed.with(Capabilities::SHELL));
         let capabilities = if can_input {
             capabilities
@@ -281,7 +293,7 @@ impl DesktopHost {
             if token.len() != 43
                 || (remote.is_none() && resume.ip != ip)
                 || resume.access.remote != remote
-                || (resume.access.unattended && !self.unattended.load(Ordering::Acquire))
+                || !resume.access.permitted_by(*self.approval_policy.borrow())
                 || resume.digest != token_digest(token)
                 || resume
                     .expires
@@ -309,12 +321,16 @@ impl DesktopHost {
             local.resume = None;
             return Ok((id, access));
         }
-        let allowed = self.persistent && self.unattended.load(Ordering::Acquire);
+        let policy = *self.approval_policy.borrow();
+        if policy == ApprovalPolicy::Password && !capabilities.includes(Capabilities::SHELL) {
+            return Ok((id, access(grant, capabilities, remote, policy)));
+        }
+        let trust_enabled = policy == ApprovalPolicy::TrustedDevices;
         let trust_epoch = self.revocation(remote.is_some());
         let scope = remote
             .as_ref()
             .map_or("lan", |identity| identity.origin.as_str());
-        if allowed && let Some(identity) = controller.clone() {
+        if trust_enabled && let Some(identity) = controller.clone() {
             let mode = scope.to_owned();
             let stored = tokio::task::spawn_blocking(move || {
                 nexdesk_store::Store::open()
@@ -322,15 +338,10 @@ impl DesktopHost {
             })
             .await;
             if let Ok(Ok(Some((control, permitted)))) = stored
-                && (!request_input || !can_input || control)
+                && (grant == Grant::View || control)
                 && permitted.includes(capabilities)
             {
-                let input = if request_input && can_input {
-                    Grant::Control
-                } else {
-                    Grant::View
-                };
-                return Ok((id, access(input, capabilities, remote, true)));
+                return Ok((id, access(grant, capabilities, remote, policy)));
             }
         }
         let (send, receive) = oneshot::channel();
@@ -353,7 +364,7 @@ impl DesktopHost {
         let mut event = json!({"event":"request", "request":id, "peer":ip.to_string(),
             "request_input":request_input, "can_input":can_input, "displays":displays, "capabilities":capabilities,
             "mode": if remote.is_some() {"id"} else {"lan"}});
-        if allowed && let Some(identity) = &controller {
+        if trust_enabled && let Some(identity) = &controller {
             event["controller"] = json!(identity.encoded());
         }
         report(event);
@@ -362,14 +373,14 @@ impl DesktopHost {
         };
         let input = match approval.decision {
             Decision::Deny => return Err(StatusCode::FORBIDDEN),
-            Decision::Control if request_input && can_input => Grant::Control,
-            Decision::Control | Decision::View => Grant::View,
+            Decision::Control => grant,
+            Decision::View => Grant::View,
         };
         let mut accepted = approval.capabilities.intersection(capabilities);
         if input != Grant::Control {
             accepted = accepted.without(Capabilities::TEXT);
         }
-        if allowed
+        if trust_enabled
             && approval.remember_controller
             && let Some(identity) = controller
         {
@@ -395,7 +406,7 @@ impl DesktopHost {
                 report(json!({"event":"issue", "code":"trust_store"}));
             }
         }
-        Ok((id, access(input, accepted, remote, false)))
+        Ok((id, access(input, accepted, remote, ApprovalPolicy::Manual)))
     }
 
     pub(crate) fn begin(
@@ -411,7 +422,7 @@ impl DesktopHost {
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         let (allow_control, allowed) = *self.permissions.borrow();
         if *self.revoked[usize::from(access.remote.is_some())].borrow() != epoch
-            || (access.unattended && !self.unattended.load(Ordering::Acquire))
+            || !access.permitted_by(*self.approval_policy.borrow())
             || (!allow_control && access.input == Grant::Control)
             || !allowed
                 .with(Capabilities::SHELL)
@@ -427,7 +438,7 @@ impl DesktopHost {
         let grant = access.input;
         let capabilities = access.capabilities;
         let mode = if access.remote.is_some() { "id" } else { "lan" };
-        let unattended = access.unattended;
+        let unattended = access.approval != ApprovalPolicy::Manual;
         local.resume = Some(Resume {
             id,
             digest: token_digest(&token),
@@ -481,13 +492,21 @@ impl DesktopHost {
         }
     }
 
-    pub(crate) fn configure_unattended(&self, enabled: bool) {
-        if self
-            .unattended
-            .swap(enabled && self.persistent, Ordering::AcqRel)
-            && !enabled
-        {
-            self.revoke();
+    pub(crate) fn configure_approval(&self, policy: ApprovalPolicy) {
+        let policy = if !self.persistent && policy == ApprovalPolicy::TrustedDevices {
+            ApprovalPolicy::Manual
+        } else {
+            policy
+        };
+        if let Ok(mut local) = self.local.lock() {
+            self.approval_policy.send_replace(policy);
+            if let Some(resume) = &local.resume
+                && !resume.access.permitted_by(policy)
+            {
+                self.revoked[usize::from(resume.access.remote.is_some())]
+                    .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+                local.resume = None;
+            }
         }
     }
 
@@ -808,6 +827,79 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn password_policy_limits_automatic_access_and_revokes_it_on_change()
+    -> Result<(), StatusCode> {
+        let host = DesktopHost::new(CaptureTarget::Pattern, true, None);
+        let ip = IpAddr::from([127, 0, 0, 1]);
+        let clipboard = Capabilities::CLIPBOARD;
+        host.configure_permissions(nexdesk_store::DesktopPermissions {
+            allowed_capabilities: clipboard.with(Capabilities::TEXT),
+            ..Default::default()
+        });
+        host.configure_approval(ApprovalPolicy::Password);
+        let request = |can_input| Incoming {
+            ip,
+            request_input: true,
+            can_input,
+            capabilities: Capabilities::ALL.without(Capabilities::SHELL),
+            remote: None,
+            controller: None,
+        };
+        let (_, viewing) = host.authorize(request(false), None).await?;
+        assert_eq!(viewing.input, Grant::View);
+        assert_eq!(viewing.capabilities, clipboard);
+
+        let (id, control) = host.authorize(request(true), None).await?;
+        assert_eq!(control.input, Grant::Control);
+        assert_eq!(control.capabilities, clipboard.with(Capabilities::TEXT));
+        let revoked = host.revocation(false);
+        let token = host.begin(id, ip, control.clone(), *revoked.borrow())?;
+        host.configure_approval(ApprovalPolicy::Manual);
+        assert!(revoked.has_changed().unwrap());
+        assert_eq!(
+            host.begin(id, ip, control, *revoked.borrow()).err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            host.authorize(request(true), Some(&token)).await.err(),
+            Some(StatusCode::GONE)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn password_policy_still_requires_shell_approval() {
+        let host = DesktopHost::new(CaptureTarget::Pattern, true, None);
+        host.configure_approval(ApprovalPolicy::Password);
+        let request = Incoming {
+            ip: IpAddr::from([127, 0, 0, 1]),
+            request_input: false,
+            can_input: false,
+            capabilities: Capabilities::SHELL,
+            remote: Some(RemoteIdentity {
+                origin: "https://directory.test".into(),
+                device: "162534897".into(),
+            }),
+            controller: None,
+        };
+        let approval = host.authorize(request, None);
+        tokio::pin!(approval);
+        tokio::select! {
+            biased;
+            _ = &mut approval => panic!("Shell must wait for an explicit decision"),
+            _ = tokio::task::yield_now() => {},
+        }
+        let pending = host.local.lock().unwrap().pending.take().unwrap();
+        assert!(pending.directory);
+        let _ = pending.send.send(Approval {
+            decision: Decision::Deny,
+            capabilities: Capabilities::default(),
+            remember_controller: false,
+        });
+        assert_eq!(approval.await.err(), Some(StatusCode::FORBIDDEN));
+    }
+
+    #[tokio::test]
     async fn resume_keeps_grant_and_is_single_use_and_revocable() -> Result<(), StatusCode> {
         let host = DesktopHost::new(CaptureTarget::Pattern, false, None);
         let ip = IpAddr::from([127, 0, 0, 1]);
@@ -817,7 +909,7 @@ mod tests {
             capabilities: caps,
             files: None,
             remote: None,
-            unattended: false,
+            approval: ApprovalPolicy::Manual,
         };
         let request = |ip, can_input| Incoming {
             ip,
@@ -872,7 +964,7 @@ mod tests {
                 Grant::View,
                 Capabilities::CLIPBOARD,
                 Some(remote.clone()),
-                false,
+                ApprovalPolicy::Manual,
             ),
             0,
         )?;

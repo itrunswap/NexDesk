@@ -1,6 +1,20 @@
 import 'directory_origin.dart';
 import 'session_permissions.dart';
 
+enum ApprovalPolicy {
+  manual('manual', '每次确认', '每次连接由本机批准。'),
+  trustedDevices('trusted_devices', '可信设备免确认', '可信设备可在 30 天内按已批准的权限接入。'),
+  password('password', '密码验证后连接', '通过连接密码验证后，按本机允许的权限接入。');
+
+  const ApprovalPolicy(this.value, this.label, this.description);
+  final String value, label, description;
+
+  static ApprovalPolicy fromValue(Object? value) => values.firstWhere(
+    (policy) => policy.value == value,
+    orElse: () => manual,
+  );
+}
+
 final class DesktopSettings {
   const DesktopSettings({
     this.useSelfHosted = false,
@@ -11,7 +25,7 @@ final class DesktopSettings {
     this.source = '',
     this.shareRoot = '',
     this.allowShell = false,
-    this.unattended = false,
+    this.approvalPolicy = ApprovalPolicy.manual,
     this.downloadRoot = '',
     this.quality = 'auto',
     this.fps = 30,
@@ -28,14 +42,20 @@ final class DesktopSettings {
         source: json['source'] as String,
         shareRoot: json['share_root'] as String,
         allowShell: json['allow_shell'] == true,
-        unattended: json['unattended'] == true,
+        approvalPolicy: ApprovalPolicy.fromValue(
+          json['approval_policy'] ??
+              (json['unattended'] == true
+                  ? ApprovalPolicy.trustedDevices.value
+                  : null),
+        ),
         downloadRoot: json['download_root'] as String,
         quality: json['quality'] as String,
         fps: json['fps'] as int,
         permissions: DesktopPermissions.fromJson(json['permissions']),
       );
 
-  final bool useSelfHosted, lanAllowed, allowShell, unattended;
+  final bool useSelfHosted, lanAllowed, allowShell;
+  final ApprovalPolicy approvalPolicy;
   final String directory, address, source, shareRoot, downloadRoot, quality;
   final int port, fps;
   final DesktopPermissions permissions;
@@ -53,7 +73,7 @@ final class DesktopSettings {
         source: source,
         shareRoot: shareRoot,
         allowShell: allowShell,
-        unattended: unattended,
+        approvalPolicy: approvalPolicy,
         downloadRoot: downloadRoot,
         quality: quality,
         fps: fps,
@@ -69,7 +89,7 @@ final class DesktopSettings {
     'source': source,
     'share_root': shareRoot,
     'allow_shell': allowShell,
-    'unattended': unattended,
+    'approval_policy': approvalPolicy.value,
     'download_root': downloadRoot,
     'quality': quality,
     'fps': fps,

@@ -5,7 +5,7 @@ mod directory;
 mod preferences;
 mod trusted;
 pub use directory::RecentDirectory;
-pub use preferences::{DesktopPermissions, DesktopPreferences};
+pub use preferences::{ApprovalPolicy, DesktopPermissions, DesktopPreferences};
 pub use trusted::{TrustedDevice, controller_key};
 
 use std::{fs, net::SocketAddr, path::Path, time::Duration};
