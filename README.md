@@ -4,12 +4,12 @@ NexDesk 是一款支持局域网 IP 直连和设备 ID 连接的跨平台远程�
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/itrunswap/NexDesk/releases/latest) 选择对应平台的资产。`SHA256SUMS.txt` 列出各包的 SHA-256 校验值。
+Windows 和 macOS 桌面版使用下表的 v0.1.7 链接。Linux、Android 和自托管安装包见 [v0.1.4 完整发行](https://github.com/itrunswap/NexDesk/releases/tag/v0.1.4)。各发行的 `SHA256SUMS.txt` 列出下载包的 SHA-256 校验值。
 
 | 平台 | 发行资产 | 使用方式 |
 | --- | --- | --- |
-| Windows x64 | [v0.1.6 Windows ZIP](https://github.com/itrunswap/NexDesk/releases/download/v0.1.6/NexDesk-0.1.6-Desktop-Windows-x64.zip) | 完整解压后运行 `nexdesk_desktop.exe` |
-| macOS Apple Silicon / Intel | [v0.1.6 桌面修复版](https://github.com/itrunswap/NexDesk/releases/tag/v0.1.6) | 选择 `Desktop-macOS-arm64.zip` 或 `Desktop-macOS-x64.zip`，解压后打开 `NexDesk.app`。预览签名见[运行与打包](docs/build.md#macos) |
+| Windows x64 | [v0.1.7 Windows ZIP](https://github.com/itrunswap/NexDesk/releases/download/v0.1.7/NexDesk-0.1.7-Desktop-Windows-x64.zip) | 完整解压后运行 `nexdesk_desktop.exe` |
+| macOS Apple Silicon / Intel | [v0.1.7 桌面版](https://github.com/itrunswap/NexDesk/releases/tag/v0.1.7) | 选择 `Desktop-macOS-arm64.zip` 或 `Desktop-macOS-x64.zip`，解压后打开 `NexDesk.app`。预览签名见[运行与打包](docs/build.md#macos) |
 | Linux x64 | `Desktop-Linux-x64.tar.gz` | 执行 `tar -xzf <包名>`，在解压目录运行 `./nexdesk_desktop` |
 | Android ARM64 | `Android-ARM64-Preview.apk` | 安装预览 APK，填写服务地址和目标设备 ID |
 | iOS / iPadOS | 浏览器或自签名应用 | 在 Safari 打开服务地址。原生包使用自己的开发团队签名 |
