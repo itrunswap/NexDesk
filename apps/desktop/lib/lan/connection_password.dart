@@ -73,6 +73,7 @@ class _PasswordDialogState extends State<_PasswordDialog> {
   final _focus = FocusNode();
   late bool _stored = widget.saved;
   late bool _remember = widget.saved;
+  bool _obscure = true;
   bool get _valid => _stored || _code.text.length == 6;
 
   void _submit() {
@@ -129,14 +130,29 @@ class _PasswordDialogState extends State<_PasswordDialog> {
               controller: _code,
               focusNode: _focus,
               autofocus: true,
-              obscureText: true,
+              obscureText: _obscure,
+              textInputAction: TextInputAction.go,
               autocorrect: false,
               enableSuggestions: false,
               inputFormatters: [
                 FilteringTextInputFormatter.allow(RegExp('[a-zA-Z0-9]')),
                 LengthLimitingTextInputFormatter(6),
               ],
-              decoration: const InputDecoration(labelText: '六位连接密码'),
+              decoration: InputDecoration(
+                labelText: '六位连接密码',
+                suffixIcon: IconButton(
+                  tooltip: _obscure ? '显示输入的密码' : '隐藏输入的密码',
+                  onPressed: () {
+                    setState(() => _obscure = !_obscure);
+                    _focus.requestFocus();
+                  },
+                  icon: Icon(
+                    _obscure
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined,
+                  ),
+                ),
+              ),
               onChanged: (_) => setState(() {}),
               onSubmitted: (_) => _submit(),
             ),

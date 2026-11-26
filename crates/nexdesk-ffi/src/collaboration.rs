@@ -423,11 +423,13 @@ pub unsafe extern "C" fn nexdesk_m3_info(id: u64, output: *mut u8, capacity: usi
     let Some(context) = viewer_context(id) else {
         return 0;
     };
+    let frame_size = crate::preview::nexdesk_m1_frame_size(id);
     let Ok(info) = context.info.lock() else {
         return 0;
     };
     let fields = json!({
         "session": &*info,
+        "decoded_frame": {"width": frame_size >> 32, "height": frame_size as u32},
         "tasks": context.files.snapshot(),
         "local_root": context.files.root_label(),
         "volume": context.volume.load(Relaxed),

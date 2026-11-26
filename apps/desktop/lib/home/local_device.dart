@@ -325,10 +325,10 @@ class _LocalDeviceState extends State<LocalDevice> {
         : host?.directoryStatus == 'revoked'
         ? null
         : host?.directoryDevice;
+    final addressLabel = lan ? 'IP 和端口' : '设备 ID';
     final code = lan
         ? (host?.settings.lanAllowed == true ? host?.code : null)
         : (host?.directoryOrigin != null ? host?.directoryCode : null);
-    final fingerprint = lan ? host?.identity : host?.directoryIdentity;
     final issue =
         host?.issue ?? (lan ? host?.lanIssue : null) ?? host?.shareIssue;
     final passwordAvailable =
@@ -358,14 +358,18 @@ class _LocalDeviceState extends State<LocalDevice> {
             leading: _value(
               shownAddress ?? '—',
               id: !lan,
-              copyDescription: '点击复制本机地址',
-              onCopy: address == null ? null : () => _copy(address, '已复制本机地址'),
+              copyDescription: '点击复制$addressLabel',
+              onCopy: address == null
+                  ? null
+                  : () => _copy(address, '已复制$addressLabel'),
             ),
             actions: [
               _icon(
                 Icons.content_copy_rounded,
-                '复制本机地址',
-                address == null ? null : () => _copy(address, '已复制本机地址'),
+                '复制$addressLabel',
+                address == null
+                    ? null
+                    : () => _copy(address, '已复制$addressLabel'),
               ),
             ],
           ),
@@ -415,40 +419,6 @@ class _LocalDeviceState extends State<LocalDevice> {
             ),
           ],
         ),
-        if (fingerprint != null && address != null)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: _textAction(
-              '查看设备指纹',
-              () => showDialog<void>(
-                context: context,
-                builder: (context) => AlertDialog(
-                  title: const Text('本机设备指纹'),
-                  content: SelectableText(fingerprint),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: const Text('关闭'),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        if (host?.peer case final peer?)
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text(
-              '$peer · ${host!.grant == 'control' ? '正在控制' : '正在观看'}',
-            ),
-            subtitle: host.activeCapabilities & 64 != 0
-                ? const Text('已授权远程 Shell')
-                : null,
-            trailing: TextButton(
-              onPressed: host.revoke,
-              child: const Text('撤销会话'),
-            ),
-          ),
         if (issue != null) Text(issue, style: text.bodySmall),
       ],
     );

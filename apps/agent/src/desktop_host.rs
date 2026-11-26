@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as BASE64};
 use nexdesk_directory::RemoteIdentity;
 use nexdesk_files::{Root, TransferStore};
-use nexdesk_media::{CaptureKind, CaptureTarget, capture_sources};
+use nexdesk_media::{CaptureKind, CaptureTarget, EncodingPreference, capture_sources};
 use nexdesk_session::{
     collaboration::Capabilities,
     control::Grant,
@@ -40,6 +40,7 @@ const RESUME_TIME: Duration = Duration::from_secs(20);
 
 pub(crate) struct DesktopHost {
     capture: watch::Sender<CaptureTarget>,
+    encoding: watch::Sender<Option<EncodingPreference>>,
     share: watch::Sender<Option<Arc<Root>>>,
     permissions: watch::Sender<(bool, Capabilities)>,
     persistent: bool,
@@ -78,7 +79,8 @@ pub(crate) struct Access {
 
 impl Access {
     fn permitted_by(&self, policy: ApprovalPolicy) -> bool {
-        self.approval == ApprovalPolicy::Manual || self.approval == policy
+        self.approval == policy
+            || (self.approval == ApprovalPolicy::Manual && policy != ApprovalPolicy::TrustedOnly)
     }
 }
 
@@ -182,6 +184,7 @@ impl DesktopHost {
         let permissions = nexdesk_store::DesktopPermissions::default();
         Arc::new(Self {
             capture: watch::channel(capture).0,
+            encoding: watch::channel(None).0,
             share: watch::channel(share).0,
             permissions: watch::channel((
                 permissions.allow_control,
@@ -325,12 +328,16 @@ impl DesktopHost {
         if policy == ApprovalPolicy::Password && !capabilities.includes(Capabilities::SHELL) {
             return Ok((id, access(grant, capabilities, remote, policy)));
         }
-        let trust_enabled = policy == ApprovalPolicy::TrustedDevices;
+        let can_enroll = policy == ApprovalPolicy::TrustedDevices;
+        let trusted_only = policy == ApprovalPolicy::TrustedOnly;
         let trust_epoch = self.revocation(remote.is_some());
         let scope = remote
             .as_ref()
             .map_or("lan", |identity| identity.origin.as_str());
-        if trust_enabled && let Some(identity) = controller.clone() {
+        if self.persistent
+            && (can_enroll || trusted_only)
+            && let Some(identity) = controller.clone()
+        {
             let mode = scope.to_owned();
             let stored = tokio::task::spawn_blocking(move || {
                 nexdesk_store::Store::open()
@@ -344,15 +351,24 @@ impl DesktopHost {
                 return Ok((id, access(grant, capabilities, remote, policy)));
             }
         }
+        if trusted_only {
+            return Err(StatusCode::FORBIDDEN);
+        }
         let (send, receive) = oneshot::channel();
-        self.local
-            .lock()
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-            .pending = Some(PendingApproval {
-            id,
-            directory: remote.is_some(),
-            send,
-        });
+        {
+            let mut local = self
+                .local
+                .lock()
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            if *self.approval_policy.borrow() == ApprovalPolicy::TrustedOnly {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            local.pending = Some(PendingApproval {
+                id,
+                directory: remote.is_some(),
+                send,
+            });
+        }
         let _prompt = Prompt { owner: self, id };
         let displays = matches!(
             self.capture(),
@@ -364,7 +380,7 @@ impl DesktopHost {
         let mut event = json!({"event":"request", "request":id, "peer":ip.to_string(),
             "request_input":request_input, "can_input":can_input, "displays":displays, "capabilities":capabilities,
             "mode": if remote.is_some() {"id"} else {"lan"}});
-        if trust_enabled && let Some(identity) = &controller {
+        if can_enroll && let Some(identity) = &controller {
             event["controller"] = json!(identity.encoded());
         }
         report(event);
@@ -380,7 +396,7 @@ impl DesktopHost {
         if input != Grant::Control {
             accepted = accepted.without(Capabilities::TEXT);
         }
-        if trust_enabled
+        if can_enroll
             && approval.remember_controller
             && let Some(identity) = controller
         {
@@ -500,6 +516,9 @@ impl DesktopHost {
         };
         if let Ok(mut local) = self.local.lock() {
             self.approval_policy.send_replace(policy);
+            if policy == ApprovalPolicy::TrustedOnly {
+                local.pending = None;
+            }
             if let Some(resume) = &local.resume
                 && !resume.access.permitted_by(policy)
             {
@@ -516,6 +535,14 @@ impl DesktopHost {
         if (control && !next.0) || !next.1.includes(caps) {
             self.revoke();
         }
+    }
+
+    pub(crate) fn configure_encoding(&self, preference: EncodingPreference) {
+        self.encoding.send_replace(Some(preference));
+    }
+
+    pub(crate) fn encoding(&self) -> Option<EncodingPreference> {
+        *self.encoding.borrow()
     }
 
     fn revoke(&self) {
@@ -864,6 +891,45 @@ mod tests {
             host.authorize(request(true), Some(&token)).await.err(),
             Some(StatusCode::GONE)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn trusted_only_revokes_manual_sessions_and_refuses_new_untrusted_requests()
+    -> Result<(), StatusCode> {
+        let host = DesktopHost::new(CaptureTarget::Pattern, true, None);
+        let ip = IpAddr::from([127, 0, 0, 1]);
+        let revoked = host.revocation(false);
+        let manual = access(
+            Grant::Control,
+            Capabilities::default(),
+            None,
+            ApprovalPolicy::Manual,
+        );
+        let token = host.begin(1, ip, manual.clone(), *revoked.borrow())?;
+        host.configure_approval(ApprovalPolicy::TrustedOnly);
+        assert!(revoked.has_changed().unwrap());
+        assert_eq!(
+            host.begin(1, ip, manual, *revoked.borrow()).err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+        let request = || Incoming {
+            ip,
+            request_input: true,
+            can_input: true,
+            capabilities: Capabilities::default(),
+            remote: None,
+            controller: None,
+        };
+        assert_eq!(
+            host.authorize(request(), None).await.err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            host.authorize(request(), Some(&token)).await.err(),
+            Some(StatusCode::GONE)
+        );
+        assert!(host.local.lock().unwrap().pending.is_none());
         Ok(())
     }
 

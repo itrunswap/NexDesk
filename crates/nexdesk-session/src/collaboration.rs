@@ -5,6 +5,7 @@ use nexdesk_platform::{AudioStatus, DisplayMode};
 use serde::{Deserialize, Serialize};
 
 pub use crate::envelope::{decode, encode};
+pub use nexdesk_media::{Codec, EncodingPreference, ResolutionLimit};
 
 pub const TEXT_LIMIT: usize = 4096;
 

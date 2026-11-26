@@ -1,6 +1,6 @@
 //! Bounds and checks the desktop capturer's native buffer and source selection.
 
-use std::slice;
+use std::{slice, sync::Arc};
 
 use cxx::UniquePtr;
 use libwebrtc::{
@@ -14,7 +14,7 @@ use webrtc_sys::desktop_capturer::{
 
 pub(crate) use webrtc_sys::desktop_capturer::{CaptureError, ffi::SourceType};
 
-use crate::{CaptureRegion, MediaError, capture::valid_size};
+use crate::{CaptureRegion, FrameSize, MediaError, capture::CaptureSettings};
 
 type CapturedFrame = (VideoFrame<NV12Buffer>, CaptureRegion);
 
@@ -66,6 +66,7 @@ impl DesktopCapture {
     pub(crate) fn start(
         &mut self,
         source: Option<u64>,
+        settings: Arc<CaptureSettings>,
         callback: impl FnMut(Result<CapturedFrame, CaptureError>) + Send + 'static,
     ) -> Result<(), MediaError> {
         if let Some(source) = source
@@ -77,7 +78,7 @@ impl DesktopCapture {
         self.capturer
             .pin_mut()
             .start(Box::new(DesktopCapturerCallbackWrapper::new(Box::new(
-                FrameCallback(callback),
+                FrameCallback { callback, settings },
             ))));
         Ok(())
     }
@@ -87,28 +88,37 @@ impl DesktopCapture {
     }
 }
 
-struct FrameCallback<F>(F);
+struct FrameCallback<F> {
+    callback: F,
+    settings: Arc<CaptureSettings>,
+}
 
 impl<F> DesktopCapturerCallback for FrameCallback<F>
 where
     F: FnMut(Result<CapturedFrame, CaptureError>) + Send,
 {
     fn on_capture_result(&mut self, result: Result<UniquePtr<DesktopFrame>, CaptureError>) {
-        (self.0)(result.and_then(|frame| {
+        (self.callback)(result.and_then(|frame| {
             frame
                 .as_ref()
-                .and_then(to_nv12)
+                .and_then(|frame| to_nv12(frame, &self.settings))
                 .ok_or(CaptureError::Temporary)
         }));
     }
 }
 
-fn to_nv12(frame: &DesktopFrame) -> Option<CapturedFrame> {
+fn to_nv12(frame: &DesktopFrame, settings: &CaptureSettings) -> Option<CapturedFrame> {
     let width = u32::try_from(frame.width()).ok()? & !1;
     let height = u32::try_from(frame.height()).ok()? & !1;
     let stride = u32::try_from(frame.stride()).ok()?;
     let pointer = frame.data();
-    if !valid_size(width, height) || stride < width * 4 || stride > 65_536 || pointer.is_null() {
+    if !(2..=8192).contains(&width)
+        || !(2..=8192).contains(&height)
+        || width * height > 8192 * 4320
+        || stride < width * 4
+        || stride > 65_536
+        || pointer.is_null()
+    {
         return None;
     }
     let length = (stride as usize).checked_mul(height as usize)?;
@@ -129,6 +139,11 @@ fn to_nv12(frame: &DesktopFrame) -> Option<CapturedFrame> {
         width as i32,
         height as i32,
     );
+    let source = FrameSize { width, height };
+    let output = settings.output_size(source);
+    if source != output {
+        image = image.scale(output.width as i32, output.height as i32);
+    }
     let region = CaptureRegion {
         left: frame.left(),
         top: frame.top(),

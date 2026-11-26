@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::{
     sync::watch,
     task::JoinSet,
-    time::{sleep, timeout},
+    time::{Instant, sleep, timeout},
 };
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
@@ -28,6 +28,11 @@ use crate::{
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+// The directory sends a heartbeat every 10 seconds. A silent TCP connection
+// must not keep the receiver registered locally after that traffic stops.
+const LINK_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) async fn run(
     host: Arc<Host>,
@@ -138,7 +143,7 @@ async fn write(socket: &mut Socket, message: FromHost) -> Result<()> {
         return Err(io::Error::other("directory message exceeds limit").into());
     }
     timeout(
-        Duration::from_secs(5),
+        SOCKET_WRITE_TIMEOUT,
         socket.send(Message::Text(json.into())),
     )
     .await??;
@@ -148,11 +153,16 @@ async fn write(socket: &mut Socket, message: FromHost) -> Result<()> {
 async fn serve(mut socket: Socket, host: &Arc<Host>, identity: RemoteIdentity) -> Result<LinkExit> {
     let (close, protection) = watch::channel(false);
     let mut calls = JoinSet::new();
+    let idle = sleep(LINK_IDLE_TIMEOUT);
+    tokio::pin!(idle);
     let result = loop {
         tokio::select! {
+            _ = &mut idle => break LinkExit::Disconnected,
             request = socket.next() => {
-                match request {
-                    Some(Ok(Message::Text(text))) => match serde_json::from_str::<ToHost>(&text)? {
+                let Some(Ok(message)) = request else { break LinkExit::Disconnected };
+                idle.as_mut().reset(Instant::now() + LINK_IDLE_TIMEOUT);
+                match message {
+                    Message::Text(text) => match serde_json::from_str::<ToHost>(&text)? {
                         ToHost::Revoked => break LinkExit::Revoked,
                         ToHost::Request(request) if calls.len() < 8 => {
                             calls.spawn(handle(host.clone(), identity.clone(), protection.clone(), request));
@@ -162,7 +172,11 @@ async fn serve(mut socket: Socket, host: &Arc<Host>, identity: RemoteIdentity) -
                         }
                         _ => break LinkExit::Disconnected,
                     },
-                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    Message::Ping(_) => {
+                        // Tungstenite has queued the matching pong while reading the ping.
+                        timeout(SOCKET_WRITE_TIMEOUT, socket.flush()).await??;
+                    }
+                    Message::Pong(_) => {}
                     _ => break LinkExit::Disconnected,
                 }
             }

@@ -101,6 +101,7 @@ impl Target {
                 resume: None,
                 capabilities: Some(self.capabilities),
                 controller: None,
+                force_relay: false,
             },
             async move |identity| pin.is_some() || confirm(identity).await,
             waiting,

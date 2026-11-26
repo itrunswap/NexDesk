@@ -3,7 +3,7 @@ use std::{
     net::IpAddr,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicU8, AtomicU16, Ordering::Relaxed},
+        atomic::{AtomicU8, Ordering::Relaxed},
     },
     time::{Duration, Instant},
 };
@@ -22,10 +22,10 @@ use libwebrtc::{
         RtcConfiguration, native::PeerConnectionFactoryExt,
     },
     rtp_parameters::RtpCodecCapability,
-    rtp_sender::RtpSender,
+    rtp_sender::{RtpSender, VideoEncoderBackend},
     rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit},
     session_description::{SdpType, SessionDescription},
-    stats::{IceCandidateType, RtcStats},
+    stats::{IceCandidateType, QualityLimitationReason, RtcStats},
     video_frame::{BoxVideoFrame, VideoFormatType},
     video_source::{VideoResolution, native::NativeVideoSource},
     video_stream::native::{NativeVideoStream, NativeVideoStreamOptions},
@@ -41,8 +41,8 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 use crate::{
-    CaptureStatus, CaptureTarget, ControlPipe, MediaError, Quality, ReceivedSound,
-    capture::{CaptureTask, FrameSink, PROBE_HEIGHT, PROBE_WIDTH, valid_size},
+    CaptureStatus, CaptureTarget, ControlPipe, FrameSize, MediaError, Quality, ReceivedSound,
+    capture::{CaptureSettings, CaptureTask, FrameSink, PROBE_HEIGHT, PROBE_WIDTH, valid_size},
     sound,
 };
 
@@ -50,19 +50,46 @@ pub const DESCRIPTION_LIMIT: usize = 48 * 1024;
 const ICE_DEADLINE: Duration = Duration::from_secs(5);
 const MAX_CANDIDATES: usize = 64;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
 pub enum Codec {
-    H264,
-    Vp8,
+    H264 = 1,
+    Vp8 = 2,
+    Av1 = 3,
 }
 
 impl Codec {
+    pub fn from_value(value: u8) -> Option<Self> {
+        Some(match value {
+            1 => Self::H264,
+            2 => Self::Vp8,
+            3 => Self::Av1,
+            _ => return None,
+        })
+    }
+
     fn mime(self) -> &'static str {
         match self {
             Self::H264 => "video/H264",
             Self::Vp8 => "video/VP8",
+            Self::Av1 => "video/AV1",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EncodingPreference {
+    pub codec: Option<Codec>,
+    pub software: bool,
+}
+
+pub struct DesktopMediaSettings {
+    pub capture: CaptureTarget,
+    pub extended: bool,
+    pub audio: bool,
+    pub encoding: Option<EncodingPreference>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -103,7 +130,7 @@ struct Feed {
     audio: Option<RtcAudioTrack>,
     capture: Mutex<CaptureTask>,
     sink: FrameSink,
-    fps: Arc<AtomicU16>,
+    settings: Arc<CaptureSettings>,
     audio_task: Option<JoinHandle<()>>,
     system_sound: Option<Arc<Mutex<AudioCapture>>>,
     #[cfg(target_os = "windows")]
@@ -122,6 +149,8 @@ pub struct HostPeer {
     peer: Peer,
     feed: Arc<Feed>,
     sender: RtpSender,
+    preferred_codec: Codec,
+    negotiated_codec: Codec,
 }
 
 pub struct DesktopPipes {
@@ -150,13 +179,11 @@ impl HostMedia {
             return Err(MediaError::InvalidFrame);
         }
         let factory = PeerConnectionFactory::default();
-        let codecs = factory
-            .get_rtp_sender_capabilities(MediaType::Video)
-            .codecs
-            .into_iter()
-            .filter(|candidate| candidate.mime_type.eq_ignore_ascii_case(cfg.codec.mime()))
-            .collect::<Vec<_>>();
-        if codecs.is_empty() {
+        let codecs = factory.get_rtp_sender_capabilities(MediaType::Video).codecs;
+        if !codecs
+            .iter()
+            .any(|codec| codec.mime_type.eq_ignore_ascii_case(cfg.codec.mime()))
+        {
             return Err(MediaError::CodecUnavailable);
         }
         Ok(Self {
@@ -169,7 +196,7 @@ impl HostMedia {
 
     pub async fn answer(&self, offer: &str) -> Result<(HostPeer, String), MediaError> {
         let (peer, answer, _) = self
-            .answer_session(offer, None, false, false, IceOptions::Lan, false)
+            .answer_session(offer, None, IceOptions::Lan, false)
             .await?;
         Ok((peer, answer))
     }
@@ -177,12 +204,10 @@ impl HostMedia {
     pub async fn answer_desktop(
         &self,
         offer: &str,
-        target: CaptureTarget,
-        extended: bool,
-        audio: bool,
+        settings: DesktopMediaSettings,
     ) -> Result<(HostPeer, String, DesktopPipes), MediaError> {
         let (peer, answer, pipe) = self
-            .answer_session(offer, Some(target), extended, audio, IceOptions::Lan, false)
+            .answer_session(offer, Some(settings), IceOptions::Lan, false)
             .await?;
         Ok((peer, answer, pipe.ok_or(MediaError::WebRtc)?))
     }
@@ -190,13 +215,12 @@ impl HostMedia {
     pub async fn answer_routed(
         &self,
         offer: &str,
-        target: CaptureTarget,
-        audio: bool,
+        settings: DesktopMediaSettings,
         ice: IceOptions,
         shell: bool,
     ) -> Result<(HostPeer, String, DesktopPipes), MediaError> {
         let (peer, answer, pipe) = self
-            .answer_session(offer, Some(target), true, audio, ice, shell)
+            .answer_session(offer, Some(settings), ice, shell)
             .await?;
         Ok((peer, answer, pipe.ok_or(MediaError::WebRtc)?))
     }
@@ -204,50 +228,108 @@ impl HostMedia {
     async fn answer_session(
         &self,
         offer: &str,
-        target: Option<CaptureTarget>,
-        extended: bool,
-        audio: bool,
+        settings: Option<DesktopMediaSettings>,
         ice: IceOptions,
         shell: bool,
     ) -> Result<(HostPeer, String, Option<DesktopPipes>), MediaError> {
         // Limit the offered video payload types without changing authenticated ICE or DTLS.
-        let desktop = target.is_some();
-        let offer = restrict_video_offer(offer, self.cfg.codec)?;
+        let desktop = settings.is_some();
+        let extended = settings.as_ref().is_some_and(|settings| settings.extended);
+        let encoding = settings.as_ref().and_then(|settings| settings.encoding);
+        let preferred = encoding
+            .and_then(|encoding| encoding.codec)
+            .unwrap_or(self.cfg.codec);
+        let (chosen, codecs, offer) = self.select_codec(offer, preferred, encoding.is_some())?;
         let routed = ice.routed();
         let offer = checked_description(&offer, SdpType::Offer, desktop, routed)?;
         let peer = Peer::new(&self.factory, ice)?;
         let pipe = desktop
-            .then(|| DesktopPipes::new(&peer.0, extended, shell))
+            .then(|| DesktopPipes::new(&peer.connection, extended, shell))
             .transpose()?;
-        peer.0.set_remote_description(offer).await?;
-        let feed = if let Some(target) = target {
-            self.create_feed(target, extended, audio).await?
+        peer.connection.set_remote_description(offer).await?;
+        let feed = if let Some(settings) = settings {
+            self.create_feed(
+                settings.capture,
+                extended,
+                settings.audio,
+                chosen,
+                encoding.is_none(),
+            )
+            .await?
         } else {
             self.feed().await?
         };
         let sender = peer
-            .0
+            .connection
             .add_track(MediaStreamTrack::Video(feed.video.clone()), &["desktop"])?;
-        #[cfg(target_os = "windows")]
-        if feed.pre_encoded {
-            sender
-                .set_video_encoder_backend(libwebrtc::rtp_sender::VideoEncoderBackend::PreEncoded);
+        if let Some(encoding) = encoding {
+            sender.set_video_encoder_backend(if encoding.software {
+                VideoEncoderBackend::Software
+            } else {
+                VideoEncoderBackend::Hardware
+            });
+        } else {
+            #[cfg(target_os = "windows")]
+            if feed.pre_encoded {
+                sender.set_video_encoder_backend(VideoEncoderBackend::PreEncoded);
+            }
         }
-        for transceiver in peer.0.transceivers() {
+        for transceiver in peer.connection.transceivers() {
             if matches!(
                 transceiver.sender().track(),
                 Some(MediaStreamTrack::Video(_))
             ) {
-                transceiver.set_codec_preferences(self.codecs.clone())?;
+                transceiver.set_codec_preferences(codecs.clone())?;
             }
         }
         if let Some(track) = &feed.audio {
-            peer.0
+            peer.connection
                 .add_track(MediaStreamTrack::Audio(track.clone()), &["desktop"])?;
         }
-        let description = peer.0.create_answer(AnswerOptions::default()).await?;
-        let answer = gather(&peer.0, description, routed).await?;
-        Ok((HostPeer { peer, feed, sender }, answer, pipe))
+        let description = peer
+            .connection
+            .create_answer(AnswerOptions::default())
+            .await?;
+        let answer = gather(&peer, description, routed).await?;
+        Ok((
+            HostPeer {
+                peer,
+                feed,
+                sender,
+                preferred_codec: preferred,
+                negotiated_codec: chosen,
+            },
+            answer,
+            pipe,
+        ))
+    }
+
+    fn select_codec(
+        &self,
+        offer: &str,
+        preferred: Codec,
+        allow_fallback: bool,
+    ) -> Result<(Codec, Vec<RtpCodecCapability>, String), MediaError> {
+        let fallback = [Codec::H264, Codec::Vp8]
+            .into_iter()
+            .filter(|codec| allow_fallback && *codec != preferred);
+        for codec in std::iter::once(preferred).chain(fallback) {
+            let supported: Vec<_> = self
+                .codecs
+                .iter()
+                .filter(|entry| entry.mime_type.eq_ignore_ascii_case(codec.mime()))
+                .cloned()
+                .collect();
+            if supported.is_empty() {
+                continue;
+            }
+            match restrict_video_offer(offer, codec) {
+                Ok(sdp) => return Ok((codec, supported, sdp)),
+                Err(MediaError::CodecUnavailable) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(MediaError::CodecUnavailable)
     }
 
     async fn feed(&self) -> Result<Arc<Feed>, MediaError> {
@@ -255,7 +337,9 @@ impl HostMedia {
         if let Some(feed) = active.upgrade() {
             return Ok(feed);
         }
-        let feed = self.create_feed(self.cfg.capture, false, false).await?;
+        let feed = self
+            .create_feed(self.cfg.capture, false, false, self.cfg.codec, true)
+            .await?;
         *active = Arc::downgrade(&feed);
         Ok(feed)
     }
@@ -265,13 +349,15 @@ impl HostMedia {
         target: CaptureTarget,
         extended: bool,
         audio: bool,
+        codec: Codec,
+        legacy_encoder: bool,
     ) -> Result<Arc<Feed>, MediaError> {
-        let (source, sink) = self.video_source().await;
+        let (source, sink) = self.video_source(codec, legacy_encoder).await;
         #[cfg(target_os = "windows")]
         let pre_encoded = matches!(sink, FrameSink::Hardware(_));
         let video = self.factory.create_video_track("desktop", source);
-        let fps = Arc::new(AtomicU16::new(self.cfg.fps));
-        let capture = CaptureTask::spawn(target, sink.clone(), fps.clone())?;
+        let settings = Arc::new(CaptureSettings::new(self.cfg.fps));
+        let capture = CaptureTask::spawn(target, sink.clone(), settings.clone())?;
         let system_sound = if audio {
             AudioCapture::start()
                 .ok()
@@ -307,7 +393,7 @@ impl HostMedia {
             audio,
             capture: Mutex::new(capture),
             sink,
-            fps,
+            settings,
             audio_task,
             system_sound,
             #[cfg(target_os = "windows")]
@@ -315,9 +401,13 @@ impl HostMedia {
         }))
     }
 
-    async fn video_source(&self) -> (NativeVideoSource, FrameSink) {
+    async fn video_source(
+        &self,
+        _codec: Codec,
+        _legacy_encoder: bool,
+    ) -> (NativeVideoSource, FrameSink) {
         #[cfg(target_os = "windows")]
-        if self.cfg.prefer_mf_h264 && self.cfg.codec == Codec::H264 {
+        if _legacy_encoder && self.cfg.prefer_mf_h264 && _codec == Codec::H264 {
             let source = crate::windows_h264::source();
             let upstream = source.clone();
             let fps = self.cfg.fps;
@@ -351,12 +441,12 @@ impl HostPeer {
     }
 
     pub fn fps(&self) -> u16 {
-        self.feed.fps.load(Relaxed)
+        self.feed.settings.fps.load(Relaxed)
     }
 
     pub fn set_quality(&self, quality: Quality) -> Result<(), MediaError> {
         quality.apply(&self.sender)?;
-        self.feed.fps.store(quality.fps, Relaxed);
+        self.feed.settings.set(quality);
         Ok(())
     }
 
@@ -381,14 +471,14 @@ impl HostPeer {
             .capture
             .lock()
             .map_err(|_| MediaError::CaptureUnavailable)?;
-        let next = CaptureTask::spawn(target, self.feed.sink.clone(), self.feed.fps.clone())?;
+        let next = CaptureTask::spawn(target, self.feed.sink.clone(), self.feed.settings.clone())?;
         *current = next;
         Ok(())
     }
 
     pub fn has_ended(&self) -> bool {
         matches!(
-            self.peer.0.connection_state(),
+            self.peer.connection.connection_state(),
             PeerConnectionState::Failed
                 | PeerConnectionState::Closed
                 | PeerConnectionState::Disconnected
@@ -396,7 +486,22 @@ impl HostPeer {
     }
 
     pub async fn stats(&self) -> Result<MediaStats, MediaError> {
-        Ok(MediaStats::from_rtc(self.peer.0.get_stats().await?, true))
+        let mut stats = self.peer.stats(true).await?;
+        let capture = self.status();
+        stats.source_size = capture
+            .region
+            .map(|region| FrameSize {
+                width: region.width,
+                height: region.height,
+            })
+            .or(capture.frame_size);
+        stats.capture_size = capture.frame_size;
+        stats.capture_work_ms = capture
+            .frame_size
+            .map(|_| capture.last_frame_work_us as f64 / 1000.0);
+        stats.requested_codec = Some(self.preferred_codec);
+        stats.negotiated_codec = Some(self.negotiated_codec);
+        Ok(stats)
     }
 }
 
@@ -418,29 +523,43 @@ async fn audio_probe(source: NativeAudioSource) {
     }
 }
 
-struct Peer(PeerConnection);
+struct Peer {
+    connection: PeerConnection,
+    relay_only: bool,
+}
 
 impl Peer {
     fn new(factory: &PeerConnectionFactory, ice: IceOptions) -> Result<Self, MediaError> {
         let mut cfg = RtcConfiguration::default();
         cfg.continual_gathering_policy = ContinualGatheringPolicy::GatherOnce;
-        if let IceOptions::Routed {
-            servers,
-            relay_only,
-        } = ice
-        {
+        let relay_only = matches!(
+            &ice,
+            IceOptions::Routed {
+                relay_only: true,
+                ..
+            }
+        );
+        if let IceOptions::Routed { servers, .. } = ice {
             cfg.ice_servers = servers;
             if relay_only {
                 cfg.ice_transport_type = IceTransportsType::Relay;
             }
         }
-        Ok(Self(factory.create_peer_connection(cfg)?))
+        Ok(Self {
+            connection: factory.create_peer_connection(cfg)?,
+            relay_only,
+        })
+    }
+
+    async fn stats(&self, sending: bool) -> Result<MediaStats, MediaError> {
+        let entries = self.connection.get_stats().await?;
+        Ok(MediaStats::from_rtc(entries, sending, self.relay_only))
     }
 }
 
 impl Drop for Peer {
     fn drop(&mut self) {
-        self.0.close();
+        self.connection.close();
     }
 }
 
@@ -479,11 +598,11 @@ impl ControllerOffer {
         let routed = ice.routed();
         let peer = Peer::new(&PeerConnectionFactory::default(), ice)?;
         let pipes = desktop
-            .then(|| DesktopPipes::new(&peer.0, extended, shell))
+            .then(|| DesktopPipes::new(&peer.connection, extended, shell))
             .transpose()?;
         let (track_sender, video) = mpsc::channel(1);
         let (audio_sender, audio) = mpsc::channel(1);
-        peer.0
+        peer.connection
             .on_track(Some(Box::new(move |event| match event.track {
                 MediaStreamTrack::Video(track) => {
                     let _ = track_sender.try_send(track);
@@ -494,7 +613,7 @@ impl ControllerOffer {
                 _ => {}
             })));
         for media in [MediaType::Video, MediaType::Audio] {
-            peer.0.add_transceiver_for_media(
+            peer.connection.add_transceiver_for_media(
                 media,
                 RtpTransceiverInit {
                     direction: RtpTransceiverDirection::RecvOnly,
@@ -504,14 +623,14 @@ impl ControllerOffer {
             )?;
         }
         let description = peer
-            .0
+            .connection
             .create_offer(OfferOptions {
                 ice_restart: false,
                 offer_to_receive_video: None,
                 offer_to_receive_audio: None,
             })
             .await?;
-        let sdp = gather(&peer.0, description, routed).await?;
+        let sdp = gather(&peer, description, routed).await?;
         Ok(Self {
             peer,
             video,
@@ -528,7 +647,7 @@ impl ControllerOffer {
 
     pub async fn apply_answer(mut self, sdp: &str) -> Result<View, MediaError> {
         let answer = checked_description(sdp, SdpType::Answer, self.pipes.is_some(), self.routed)?;
-        self.peer.0.set_remote_description(answer).await?;
+        self.peer.connection.set_remote_description(answer).await?;
         let track = timeout(Duration::from_secs(8), self.video.recv())
             .await
             .map_err(|_| MediaError::VideoTimeout)?
@@ -577,12 +696,12 @@ impl View {
     }
 
     pub async fn stats(&self) -> Result<MediaStats, MediaError> {
-        Ok(MediaStats::from_rtc(self.peer.0.get_stats().await?, false))
+        self.peer.stats(false).await
     }
 
     pub fn has_ended(&self) -> bool {
         matches!(
-            self.peer.0.connection_state(),
+            self.peer.connection.connection_state(),
             PeerConnectionState::Failed
                 | PeerConnectionState::Closed
                 | PeerConnectionState::Disconnected
@@ -625,18 +744,20 @@ fn to_pixel_frame(frame: BoxVideoFrame) -> Result<PixelFrame, MediaError> {
 type GatheredCandidates = HashMap<String, Vec<String>>;
 
 async fn gather(
-    peer: &PeerConnection,
+    peer: &Peer,
     description: SessionDescription,
     routed: bool,
 ) -> Result<String, MediaError> {
     let sdp = description.to_string();
+    let relay_only = peer.relay_only;
+    let peer = &peer.connection;
     let candidates = Arc::new(Mutex::new(GatheredCandidates::new()));
     let received = Arc::clone(&candidates);
     peer.on_ice_candidate(Some(Box::new(move |candidate| {
         if let Ok(mut received) = received.lock() {
             let count = received.values().map(Vec::len).sum::<usize>();
             let line = candidate.candidate();
-            if count < MAX_CANDIDATES && valid_candidate(&line, routed) {
+            if count < MAX_CANDIDATES && valid_candidate(&line, routed, relay_only) {
                 received.entry(candidate.sdp_mid()).or_default().push(line);
             }
         }
@@ -727,7 +848,7 @@ fn checked_description(
         if let Some(candidate) = line.strip_prefix("a=")
             && candidate.starts_with("candidate:")
         {
-            if !valid_candidate(candidate, routed) {
+            if !valid_candidate(candidate, routed, false) {
                 continue;
             }
             candidates += 1;
@@ -815,7 +936,7 @@ fn restrict_video_offer(sdp: &str, codec: Codec) -> Result<String, MediaError> {
     Ok(output)
 }
 
-fn valid_candidate(line: &str, routed: bool) -> bool {
+fn valid_candidate(line: &str, routed: bool, relay_only: bool) -> bool {
     if line.len() > 512 || line.contains(['\r', '\n', '\0']) || !line.starts_with("candidate:") {
         return false;
     }
@@ -833,7 +954,9 @@ fn valid_candidate(line: &str, routed: bool) -> bool {
         return false;
     }
     let candidate_type = fields.next();
-    if !(transport.eq_ignore_ascii_case("udp") || routed && transport.eq_ignore_ascii_case("tcp"))
+    if relay_only && candidate_type != Some("relay")
+        || !(transport.eq_ignore_ascii_case("udp")
+            || routed && transport.eq_ignore_ascii_case("tcp"))
         || !(candidate_type == Some("host")
             || routed && matches!(candidate_type, Some("relay" | "srflx" | "prflx")))
     {
@@ -859,6 +982,7 @@ fn valid_candidate(line: &str, routed: bool) -> bool {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct MediaStats {
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
@@ -872,6 +996,23 @@ pub struct MediaStats {
     pub power_efficient: Option<bool>,
     pub average_codec_ms: Option<f64>,
     pub ice: Option<IcePathStats>,
+    pub source_size: Option<FrameSize>,
+    pub capture_size: Option<FrameSize>,
+    pub frame_size: Option<FrameSize>,
+    pub capture_work_ms: Option<f64>,
+    pub target_bitrate_bps: Option<u64>,
+    pub limitation: Option<VideoLimitation>,
+    pub requested_codec: Option<Codec>,
+    pub negotiated_codec: Option<Codec>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoLimitation {
+    None,
+    Cpu,
+    Bandwidth,
+    Other,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -884,7 +1025,7 @@ pub struct IcePathStats {
 }
 
 impl MediaStats {
-    fn from_rtc(entries: Vec<RtcStats>, sending: bool) -> Self {
+    fn from_rtc(entries: Vec<RtcStats>, sending: bool, relay_only: bool) -> Self {
         let codecs: HashMap<&str, &str> = entries
             .iter()
             .filter_map(|entry| match entry {
@@ -896,7 +1037,7 @@ impl MediaStats {
             .collect();
         let codec = |id: &str| codecs.get(id).map(|name| (*name).to_owned());
         let mut result = Self {
-            ice: ice_path(&entries),
+            ice: ice_path(&entries, relay_only),
             ..Self::default()
         };
         for entry in &entries {
@@ -906,6 +1047,21 @@ impl MediaStats {
                         result.video_codec = codec(&stats.stream.codec_id);
                         result.video_frames = stats.outbound.frames_encoded;
                         result.video_bytes = stats.sent.bytes_sent;
+                        result.frame_size =
+                            measured_size(stats.outbound.frame_width, stats.outbound.frame_height);
+                        result.target_bitrate_bps = (stats.outbound.target_bitrate > 0.0)
+                            .then_some(stats.outbound.target_bitrate as u64);
+                        if result.frame_size.is_some() {
+                            result.limitation =
+                                Some(match stats.outbound.quality_limitation_reason {
+                                    QualityLimitationReason::None => VideoLimitation::None,
+                                    QualityLimitationReason::Cpu => VideoLimitation::Cpu,
+                                    QualityLimitationReason::Bandwidth => {
+                                        VideoLimitation::Bandwidth
+                                    }
+                                    QualityLimitationReason::Other => VideoLimitation::Other,
+                                });
+                        }
                         result.set_video_path(
                             &stats.outbound.encoder_implementation,
                             stats.outbound.power_efficient_encoder,
@@ -921,6 +1077,8 @@ impl MediaStats {
                         result.video_codec = codec(&stats.stream.codec_id);
                         result.video_frames = stats.inbound.frames_decoded;
                         result.video_bytes = stats.inbound.bytes_received;
+                        result.frame_size =
+                            measured_size(stats.inbound.frame_width, stats.inbound.frame_height);
                         result.dropped_frames = stats.inbound.frames_dropped;
                         result.lost_packets = stats.received.packets_lost;
                         if stats.inbound.jitter_buffer_emitted_count > 0 {
@@ -956,7 +1114,11 @@ impl MediaStats {
     }
 }
 
-fn ice_path(entries: &[RtcStats]) -> Option<IcePathStats> {
+fn measured_size(width: u32, height: u32) -> Option<FrameSize> {
+    (width > 0 && height > 0).then_some(FrameSize { width, height })
+}
+
+fn ice_path(entries: &[RtcStats], relay_only: bool) -> Option<IcePathStats> {
     let id = entries.iter().find_map(|entry| match entry {
         RtcStats::Transport(stats) if !stats.transport.selected_candidate_pair_id.is_empty() => {
             Some(stats.transport.selected_candidate_pair_id.as_str())
@@ -983,8 +1145,9 @@ fn ice_path(entries: &[RtcStats]) -> Option<IcePathStats> {
         protocol: local.protocol.clone(),
         local_scope: address_scope(&local.address).to_owned(),
         remote_scope: address_scope(&remote.address).to_owned(),
-        relayed: [local.candidate_type, remote.candidate_type]
-            .contains(&Some(IceCandidateType::Relay)),
+        relayed: relay_only
+            || [local.candidate_type, remote.candidate_type]
+                .contains(&Some(IceCandidateType::Relay)),
         rtt_ms: pair.current_round_trip_time * 1000.0,
     })
 }
@@ -1003,6 +1166,16 @@ fn address_scope(address: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_only_signals_only_turn_candidates() {
+        let host = "candidate:1 1 udp 2122260223 192.168.1.10 50102 typ host";
+        let relay = "candidate:2 1 udp 41754367 192.0.2.1 49160 typ relay";
+        assert!(valid_candidate(host, true, false));
+        assert!(!valid_candidate(host, true, true));
+        assert!(valid_candidate(relay, true, true));
+        assert!(!valid_candidate(relay, false, false));
+    }
 
     #[test]
     fn strict_codec_keeps_dtls_and_other_tracks() -> Result<(), MediaError> {

@@ -8,6 +8,23 @@ import 'native_desktop.dart';
 
 enum SurfaceScale { fit, original, enlarge }
 
+Size remoteFrameLayout(
+  Size viewport,
+  Size frame,
+  SurfaceScale scale,
+  double pixelRatio,
+) {
+  final factor = switch (scale) {
+    SurfaceScale.fit => math.min(
+      viewport.width / frame.width,
+      viewport.height / frame.height,
+    ),
+    SurfaceScale.original => 1 / pixelRatio,
+    SurfaceScale.enlarge => 2 / pixelRatio,
+  };
+  return frame * factor;
+}
+
 typedef DesktopActionSender = bool Function(
   int viewer,
   DesktopAction action, {
@@ -179,16 +196,12 @@ class _RemoteSurfaceState extends State<RemoteSurface>
       }
       final width = widget.frameWidth > 0 ? widget.frameWidth : 1280;
       final height = widget.frameHeight > 0 ? widget.frameHeight : 720;
-      final fit = math.min(
-        constraints.maxWidth / width,
-        constraints.maxHeight / height,
+      final size = remoteFrameLayout(
+        constraints.biggest,
+        Size(width.toDouble(), height.toDouble()),
+        widget.scale,
+        View.of(context).devicePixelRatio,
       );
-      final factor = switch (widget.scale) {
-        SurfaceScale.fit => fit,
-        SurfaceScale.original => 1 / View.of(context).devicePixelRatio,
-        SurfaceScale.enlarge => 2 / View.of(context).devicePixelRatio,
-      };
-      final size = Size(width * factor, height * factor);
       final surface = Center(child: _surface(size));
       if (size.width <= constraints.maxWidth &&
           size.height <= constraints.maxHeight) {
@@ -256,7 +269,14 @@ class _RemoteSurfaceState extends State<RemoteSurface>
               _wheel(event.localPosition, -event.localPanDelta, size);
             }
           },
-          child: Texture(textureId: widget.texture),
+          child: Texture(
+            textureId: widget.texture,
+            filterQuality: switch (widget.scale) {
+              SurfaceScale.original => FilterQuality.none,
+              SurfaceScale.fit => FilterQuality.medium,
+              SurfaceScale.enlarge => FilterQuality.low,
+            },
+          ),
         ),
       ),
     ),

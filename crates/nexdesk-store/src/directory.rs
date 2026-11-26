@@ -11,6 +11,7 @@ pub struct RecentDirectory {
     pub origin: String,
     pub device: String,
     pub label: String,
+    pub group: String,
     pub identity: String,
     pub remembered: bool,
     pub connected_at: i64,
@@ -19,8 +20,9 @@ pub struct RecentDirectory {
 impl Store {
     pub fn directory_recent(&self) -> Result<Vec<RecentDirectory>, StoreError> {
         let mut statement = self.db.prepare(
-            "SELECT origin, device, label, identity, remembered, connected_at
-             FROM id_recent ORDER BY connected_at DESC, origin, device LIMIT 32",
+            "SELECT r.origin, device, label, identity, remembered, connected_at, COALESCE(g.name,'')
+             FROM id_recent r LEFT JOIN recent_group g ON g.origin=r.origin AND g.target=r.device
+             ORDER BY connected_at DESC, r.origin, device LIMIT 32",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(RecentDirectory {
@@ -30,6 +32,7 @@ impl Store {
                 identity: row.get(3)?,
                 remembered: row.get(4)?,
                 connected_at: row.get(5)?,
+                group: row.get(6)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -139,6 +142,9 @@ impl Store {
             },
             params![origin.as_str(), device.to_string()],
         )?;
+        if remove {
+            self.set_recent_group(origin.as_str(), &device.to_string(), "")?;
+        }
         transaction.commit()?;
         Ok(())
     }

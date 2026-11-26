@@ -21,6 +21,44 @@ const HOST_ACCOUNT: &str = "local-host-v2";
 const DIRECTORY_HOST_ACCOUNT: &str = "local-id-host-v1";
 const PROFILE_VERSION: u8 = 1;
 
+#[cfg(test)]
+mod recent_tests {
+    use super::*;
+
+    #[test]
+    fn recent_groups_follow_the_connection_scope_and_removal() -> Result<(), StoreError> {
+        let store = Store::open_at(Path::new(":memory:"))?;
+        store.db.execute_batch(
+            "INSERT INTO lan_recent VALUES ('127.0.0.1:53980','LAN','pin',0,1);
+             INSERT INTO id_recent VALUES ('https://office.test','123456789','办公电脑','pin',0,1);
+             INSERT INTO id_recent VALUES ('https://home.test','123456789','家用电脑','pin',0,1);",
+        )?;
+        assert!(store.recent()?[0].group.is_empty());
+        store.set_recent_group("", "127.0.0.1:53980", "工作台")?;
+        store.set_recent_group("https://office.test", "123456789", " 办公室 ")?;
+        assert_eq!(store.recent()?[0].group, "工作台");
+        let ids = store.directory_recent()?;
+        assert_eq!(ids[0].origin, "https://home.test");
+        assert!(ids[0].group.is_empty());
+        assert_eq!(ids[1].group, "办公室");
+
+        store.forget("127.0.0.1:53980".parse().unwrap(), false)?;
+        assert_eq!(store.recent()?[0].group, "工作台");
+        store.forget("127.0.0.1:53980".parse().unwrap(), true)?;
+        store.directory_forget(
+            &"https://office.test".parse().unwrap(),
+            &"123456789".parse().unwrap(),
+            true,
+        )?;
+        let remaining: u32 =
+            store
+                .db
+                .query_row("SELECT count(*) FROM recent_group", [], |row| row.get(0))?;
+        assert_eq!(remaining, 0);
+        Ok(())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("the local data directory is unavailable")]
@@ -43,6 +81,7 @@ pub struct RecentDevice {
     pub address: String,
     pub port: u16,
     pub label: String,
+    pub group: String,
     pub identity: String,
     pub remembered: bool,
     pub connected_at: i64,
@@ -108,6 +147,10 @@ impl Store {
                 identity TEXT NOT NULL, remembered INTEGER NOT NULL, connected_at INTEGER NOT NULL,
                 PRIMARY KEY(origin, device)
              );
+             CREATE TABLE IF NOT EXISTS recent_group (
+                origin TEXT NOT NULL, target TEXT NOT NULL, name TEXT NOT NULL,
+                PRIMARY KEY(origin, target)
+             );
              CREATE TABLE IF NOT EXISTS desktop_preferences (
                 id INTEGER PRIMARY KEY CHECK (id=1), use_self_hosted INTEGER NOT NULL,
                 directory TEXT NOT NULL, lan_allowed INTEGER NOT NULL, address TEXT NOT NULL,
@@ -117,6 +160,13 @@ impl Store {
              );
              CREATE TABLE IF NOT EXISTS desktop_access_policy (
                 id INTEGER PRIMARY KEY CHECK (id=1), unattended INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS desktop_transport (
+                id INTEGER PRIMARY KEY CHECK (id=1), force_relay INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS desktop_video (
+                id INTEGER PRIMARY KEY CHECK (id=1), resolution INTEGER, max_mbps INTEGER,
+                codec INTEGER, software INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS desktop_permissions (
                 id INTEGER PRIMARY KEY CHECK (id=1), request_control INTEGER NOT NULL,
@@ -139,8 +189,9 @@ impl Store {
 
     pub fn recent(&self) -> Result<Vec<RecentDevice>, StoreError> {
         let mut statement = self.db.prepare(
-            "SELECT endpoint, label, identity, remembered, connected_at
-             FROM lan_recent ORDER BY connected_at DESC, endpoint LIMIT 32",
+            "SELECT endpoint, label, identity, remembered, connected_at, COALESCE(g.name,'')
+             FROM lan_recent r LEFT JOIN recent_group g ON g.origin='' AND g.target=r.endpoint
+             ORDER BY connected_at DESC, endpoint LIMIT 32",
         )?;
         let rows = statement.query_map([], |row| {
             let endpoint: String = row.get(0)?;
@@ -159,6 +210,7 @@ impl Store {
                 identity: row.get(2)?,
                 remembered: row.get(3)?,
                 connected_at: row.get(4)?,
+                group: row.get(5)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -248,6 +300,34 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_recent_group(
+        &self,
+        origin: &str,
+        target: &str,
+        name: &str,
+    ) -> Result<(), StoreError> {
+        let name = name.trim();
+        if name.chars().count() > 40 || name.chars().any(char::is_control) {
+            return Err(StoreError::Invalid);
+        }
+        if name.is_empty() {
+            self.db.execute(
+                "DELETE FROM recent_group WHERE origin=?1 AND target=?2",
+                params![origin, target],
+            )?;
+        } else {
+            self.db.execute(
+                "INSERT INTO recent_group (origin, target, name)
+                 SELECT ?1,?2,?3 WHERE
+                     (?1='' AND EXISTS(SELECT 1 FROM lan_recent WHERE endpoint=?2)) OR
+                     EXISTS(SELECT 1 FROM id_recent WHERE origin=?1 AND device=?2)
+                 ON CONFLICT(origin,target) DO UPDATE SET name=excluded.name",
+                params![origin, target, name],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn forget(&self, addr: SocketAddr, remove_recent: bool) -> Result<(), StoreError> {
         let transaction = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         if let Some((pin, true)) = self.lan_row(addr)? {
@@ -261,6 +341,9 @@ impl Store {
             },
             [addr.to_string()],
         )?;
+        if remove_recent {
+            self.set_recent_group("", &addr.to_string(), "")?;
+        }
         transaction.commit()?;
         Ok(())
     }

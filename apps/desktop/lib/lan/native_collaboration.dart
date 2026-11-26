@@ -4,6 +4,8 @@ import 'dart:ffi' as ffi;
 
 import 'package:ffi/ffi.dart';
 
+import '../connection/video_quality.dart';
+
 enum CollaborationCapability {
   audio(1, '系统声音'),
   clipboard(2, '文本剪贴板'),
@@ -120,6 +122,18 @@ final class NativeCollaboration {
     'request': {'kind': kind, ...fields},
     if (remember) 'remember': true,
   });
+
+  Future<VideoQuality> setQuality(int viewer, VideoQuality settings) async {
+    final response = await remote(
+      viewer,
+      'quality',
+      fields: {'quality': settings.toJson()},
+    );
+    final ok = response['ok'];
+    final quality = ok is Map ? ok['quality'] : null;
+    if (quality is! Map) throw const CollaborationIssue('invalid');
+    return VideoQuality.fromJson(quality.cast<String, Object?>());
+  }
 
   Map<String, Object?>? _read(int Function(ffi.Pointer<ffi.Uint8>, int) fill) =>
       using((arena) {

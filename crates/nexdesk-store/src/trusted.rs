@@ -95,8 +95,8 @@ impl Store {
     ) -> Result<Option<(bool, Capabilities)>, StoreError> {
         let raw: Option<(bool, u32)> = self.db.query_row(
             "SELECT input,capabilities FROM trusted_controller WHERE scope=?1 AND identity=?2
-                AND expires_at>unixepoch() AND EXISTS(SELECT 1 FROM desktop_access_policy WHERE id=1 AND unattended=?3)",
-            params![scope, identity.encoded(), ApprovalPolicy::TrustedDevices as u8],
+                AND expires_at>unixepoch() AND EXISTS(SELECT 1 FROM desktop_access_policy WHERE id=1 AND unattended IN (?3,?4))",
+            params![scope, identity.encoded(), ApprovalPolicy::TrustedDevices as u8, ApprovalPolicy::TrustedOnly as u8],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?;
         Ok(raw.and_then(|(input, bits)| {
@@ -157,6 +157,10 @@ impl Store {
                     | "transport"
                     | "revoked"
                     | "busy"
+                    | "device_offline"
+                    | "directory_unavailable"
+                    | "relay_unavailable"
+                    | "device_authorization_unavailable"
             )
         {
             return Err(StoreError::Invalid);

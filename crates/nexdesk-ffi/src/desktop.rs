@@ -37,7 +37,11 @@ const REVOKED: u32 = 13;
 const CREDENTIALS: u32 = 14;
 const UNSUPPORTED: u32 = 15;
 const CAPTURE_FAILED: u32 = 16;
-const MAX_OUTPUT: usize = 32 * 1024;
+const DEVICE_OFFLINE: u32 = 17;
+const DIRECTORY_UNAVAILABLE: u32 = 18;
+const RELAY_UNAVAILABLE: u32 = 19;
+const DEVICE_KEY_UNAVAILABLE: u32 = 20;
+const MAX_OUTPUT: usize = 64 * 1024;
 const DEVICE_AUTHORIZATION: u32 = 8;
 const AUTO_CONFIRM_IDENTITY: u32 = 16;
 
@@ -64,6 +68,7 @@ struct ConnectOptions {
     capabilities: Option<Capabilities>,
     device_authorization: bool,
     auto_confirm_identity: bool,
+    force_relay: bool,
 }
 
 enum Target {
@@ -168,6 +173,8 @@ struct DirectoryConnect<'a> {
     code: &'a str,
     flags: u32,
     capabilities: u32,
+    #[serde(default)]
+    force_relay: bool,
 }
 
 /// # Safety
@@ -195,6 +202,7 @@ pub unsafe extern "C" fn nexdesk_m4_connect(request: *const u8, length: usize) -
         options.code,
         options.flags,
         Some(capabilities),
+        options.force_relay,
     )
 }
 
@@ -213,10 +221,17 @@ fn connect_viewer(
         code,
         flags,
         capabilities,
+        false,
     )
 }
 
-fn start_viewer(target: Target, code: &str, flags: u32, capabilities: Option<Capabilities>) -> u64 {
+fn start_viewer(
+    target: Target,
+    code: &str,
+    flags: u32,
+    capabilities: Option<Capabilities>,
+    force_relay: bool,
+) -> u64 {
     if flags & !(15 | AUTO_CONFIRM_IDENTITY) != 0
         || flags & DEVICE_AUTHORIZATION != 0 && capabilities.is_none()
     {
@@ -238,6 +253,7 @@ fn start_viewer(target: Target, code: &str, flags: u32, capabilities: Option<Cap
         capabilities,
         device_authorization: flags & DEVICE_AUTHORIZATION != 0,
         auto_confirm_identity: flags & AUTO_CONFIRM_IDENTITY != 0,
+        force_relay,
     };
     let (actions, receive_actions) = mpsc::channel(96);
     let (trusted, trust) = watch::channel(false);
@@ -280,6 +296,10 @@ fn start_viewer(target: Target, code: &str, flags: u32, capabilities: Option<Cap
             let outcome = match status {
                 CREDENTIALS => "credentials",
                 UNREACHABLE => "unreachable",
+                DEVICE_OFFLINE => "device_offline",
+                DIRECTORY_UNAVAILABLE => "directory_unavailable",
+                RELAY_UNAVAILABLE => "relay_unavailable",
+                DEVICE_KEY_UNAVAILABLE => "device_authorization_unavailable",
                 HOST_CHANGED => "identity",
                 BUSY => "busy",
                 DECLINED | REJECTED => "declined",
@@ -408,7 +428,7 @@ async fn run(viewer: &Viewer, options: ConnectOptions, mut commands: Commands) -
     let controller = if options.device_authorization {
         match controller_key() {
             Ok(key) => Some(key),
-            Err(_) => return CREDENTIALS,
+            Err(_) => return DEVICE_KEY_UNAVAILABLE,
         }
     } else {
         None
@@ -450,6 +470,7 @@ async fn run(viewer: &Viewer, options: ConnectOptions, mut commands: Commands) -
                     .map(|token: &zeroize::Zeroizing<String>| token.as_str()),
                 capabilities,
                 controller: controller.as_ref(),
+                force_relay: options.force_relay,
             };
             let confirm = move |identity: HostIdentity| async move {
                 if let Ok(mut info) = context.info.lock() {
@@ -494,7 +515,7 @@ async fn run(viewer: &Viewer, options: ConnectOptions, mut commands: Commands) -
             _ = &mut commands.cancel => return STOPPED,
             result = connection => result,
         };
-        match connected {
+        let retry_failure = match connected {
             Ok(mut session) => {
                 let identity = session.connection.identity;
                 if session.capabilities.is_none() {
@@ -547,13 +568,20 @@ async fn run(viewer: &Viewer, options: ConnectOptions, mut commands: Commands) -
                     }
                     Outcome::Lost => {}
                 }
+                UNREACHABLE
             }
-            Err(SessionError::Busy | SessionError::Unreachable | SessionError::Media(_))
-                if renewing => {}
+            Err(
+                error @ (SessionError::Busy
+                | SessionError::Unreachable
+                | SessionError::DeviceOffline
+                | SessionError::DirectoryUnavailable
+                | SessionError::RelayUnavailable
+                | SessionError::Media(_)),
+            ) if renewing => status(error),
             Err(error) => return status(error),
-        }
+        };
         let Some(backoff) = [650, 1500, 3200, 4600].get(reconnects) else {
-            return UNREACHABLE;
+            return retry_failure;
         };
         reconnects += 1;
         viewer.set_status(RECONNECTING);
@@ -676,6 +704,9 @@ fn status(error: SessionError) -> u32 {
         SessionError::Unconfirmed => STOPPED,
         SessionError::ResumeExpired => REVOKED,
         SessionError::Unreachable => UNREACHABLE,
+        SessionError::DeviceOffline => DEVICE_OFFLINE,
+        SessionError::DirectoryUnavailable => DIRECTORY_UNAVAILABLE,
+        SessionError::RelayUnavailable => RELAY_UNAVAILABLE,
         SessionError::Busy => BUSY,
         SessionError::Unsupported => UNSUPPORTED,
         _ => MEDIA_FAILED,
@@ -694,6 +725,11 @@ enum LocalOperation {
     },
     Recent,
     DirectoryRecent,
+    RecentGroup {
+        origin: Option<String>,
+        target: String,
+        name: String,
+    },
     DirectoryRename {
         origin: String,
         device: String,
@@ -780,13 +816,35 @@ fn local_operation(operation: LocalOperation) -> Result<Value, StoreError> {
         };
     }
     let store = Store::open()?;
-    let address = |endpoint: String| endpoint.parse().map_err(|_| StoreError::Invalid);
+    let address = |endpoint: String| {
+        endpoint
+            .parse::<SocketAddr>()
+            .map_err(|_| StoreError::Invalid)
+    };
     match operation {
         LocalOperation::DirectoryPresence { .. } | LocalOperation::DirectoryHealth { .. } => {
             unreachable!("handled before database access")
         }
         LocalOperation::Recent => Ok(json!(store.recent()?)),
         LocalOperation::DirectoryRecent => Ok(json!(store.directory_recent()?)),
+        LocalOperation::RecentGroup {
+            origin,
+            target,
+            name,
+        } => {
+            if let Some(origin) = origin {
+                let origin = origin
+                    .parse::<ServerOrigin>()
+                    .map_err(|_| StoreError::Invalid)?;
+                let device = target
+                    .parse::<DeviceId>()
+                    .map_err(|_| StoreError::Invalid)?;
+                store.set_recent_group(origin.as_str(), &device.to_string(), &name)?;
+            } else {
+                store.set_recent_group("", &address(target)?.to_string(), &name)?;
+            }
+            Ok(Value::Null)
+        }
         LocalOperation::DirectoryRename {
             origin,
             device,

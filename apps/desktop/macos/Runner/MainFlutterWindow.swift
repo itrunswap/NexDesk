@@ -6,18 +6,118 @@ import ServiceManagement
 class MainFlutterWindow: NSWindow {
   private var remoteTexture: RemoteTextureChannel?
   private var background: NexDeskBackground?
+  private var sessions: SessionWindows?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
     let windowFrame = self.frame
     self.contentViewController = flutterViewController
     self.setFrame(windowFrame, display: true)
+    self.tabbingMode = .disallowed
 
     RegisterGeneratedPlugins(registry: flutterViewController)
     remoteTexture = RemoteTextureChannel(flutterViewController.registrar(forPlugin: "NexDeskTexture"), window: self)
-    background = NexDeskBackground(window: self, messenger: flutterViewController.engine.binaryMessenger)
+    let messenger = flutterViewController.engine.binaryMessenger
+    let sessions = SessionWindows(messenger: messenger)
+    self.sessions = sessions
+    background = NexDeskBackground(window: self, messenger: messenger) { [weak sessions] in
+      sessions?.hasWindows == true
+    }
 
     super.awakeFromNib()
+  }
+}
+
+private final class SessionWindows {
+  private let channel: FlutterMethodChannel
+  private var windows: [Int64: SessionFlutterWindow] = [:]
+
+  var hasWindows: Bool { !windows.isEmpty }
+
+  init(messenger: FlutterBinaryMessenger) {
+    channel = FlutterMethodChannel(name: "dev.nexdesk/session_window", binaryMessenger: messenger)
+    channel.setMethodCallHandler { [weak self] call, reply in
+      guard let self else { reply(false); return }
+      switch call.method {
+      case "open":
+        guard let values = call.arguments as? [String: Any],
+              let id = (values["id"] as? NSNumber)?.int64Value, id > 0,
+              let title = values["title"] as? String, !title.isEmpty, title.utf8.count <= 1024,
+              let launch = values["launch"] as? String, !launch.isEmpty, launch.utf8.count <= 16384,
+              self.windows[id] == nil else { reply(false); return }
+        let window = SessionFlutterWindow(title: title, launch: launch) { [weak self] in
+          guard let self else { return }
+          self.windows.removeValue(forKey: id)
+          self.channel.invokeMethod("closed", arguments: id)
+        }
+        self.windows[id] = window
+        window.show()
+        reply(true)
+      case "focus", "requestClose":
+        guard let id = (call.arguments as? NSNumber)?.int64Value,
+              let window = self.windows[id] else { reply(false); return }
+        window.show()
+        if call.method == "requestClose" { window.requestClose() }
+        reply(true)
+      default:
+        reply(FlutterMethodNotImplemented)
+      }
+    }
+  }
+
+  deinit { channel.setMethodCallHandler(nil) }
+}
+
+private final class SessionFlutterWindow: NSObject, NSWindowDelegate {
+  private let window: NSWindow
+  private let channel: FlutterMethodChannel
+  private var remoteTexture: RemoteTextureChannel?
+  private let onClosed: () -> Void
+
+  init(title: String, launch: String, onClosed: @escaping () -> Void) {
+    let project = FlutterDartProject()
+    project.dartEntrypointArguments = ["--nexdesk-session-window", launch]
+    let controller = FlutterViewController(project: project)
+    let window = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 1060, height: 720),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      backing: .buffered, defer: false)
+    self.window = window
+    self.onClosed = onClosed
+    channel = FlutterMethodChannel(name: "dev.nexdesk/session_window", binaryMessenger: controller.engine.binaryMessenger)
+    super.init()
+    window.title = title
+    window.tabbingMode = .disallowed
+    window.isReleasedWhenClosed = false
+    window.contentViewController = controller
+    window.delegate = self
+    window.center()
+    RegisterGeneratedPlugins(registry: controller)
+    remoteTexture = RemoteTextureChannel(controller.registrar(forPlugin: "NexDeskTexture"), window: window)
+    channel.setMethodCallHandler { [weak self] call, reply in
+      guard call.method == "close" else { reply(FlutterMethodNotImplemented); return }
+      reply(true)
+      DispatchQueue.main.async { [weak self] in self?.window.close() }
+    }
+  }
+
+  func show() {
+    if window.isMiniaturized { window.deminiaturize(nil) }
+    window.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
+  func windowShouldClose(_ sender: NSWindow) -> Bool {
+    channel.invokeMethod("requestClose", arguments: nil)
+    return false
+  }
+
+  func requestClose() { window.performClose(nil) }
+
+  func windowWillClose(_ notification: Notification) {
+    channel.setMethodCallHandler(nil)
+    remoteTexture = nil
+    onClosed()
   }
 }
 
@@ -25,9 +125,11 @@ private final class NexDeskBackground: NSObject, NSWindowDelegate {
   private weak var window: NSWindow?
   private let channel: FlutterMethodChannel
   private var item: NSStatusItem?
+  private let hasSessions: () -> Bool
 
-  init(window: NSWindow, messenger: FlutterBinaryMessenger) {
+  init(window: NSWindow, messenger: FlutterBinaryMessenger, hasSessions: @escaping () -> Bool) {
     self.window = window
+    self.hasSessions = hasSessions
     self.channel = FlutterMethodChannel(name: "dev.nexdesk/background", binaryMessenger: messenger)
     super.init()
     window.delegate = self
@@ -38,6 +140,8 @@ private final class NexDeskBackground: NSObject, NSWindowDelegate {
         return
       }
       switch call.method {
+      case "appVersion":
+        reply(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
       case "status":
         var supported = false
         var enabled = false
@@ -101,9 +205,15 @@ private final class NexDeskBackground: NSObject, NSWindowDelegate {
   }
 
   func windowShouldClose(_ sender: NSWindow) -> Bool {
-    guard item != nil else { return true }
-    sender.orderOut(nil)
-    return false
+    if item != nil {
+      sender.orderOut(nil)
+      return false
+    }
+    if hasSessions() {
+      sender.miniaturize(nil)
+      return false
+    }
+    return true
   }
 
   @objc private func showWindow() {

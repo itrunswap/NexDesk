@@ -7,12 +7,14 @@ class HomePanel extends StatelessWidget {
     required this.children,
     this.subtitle,
     this.action,
+    this.headerAction,
   });
 
   final String title;
   final String? subtitle;
   final List<Widget> children;
   final Widget? action;
+  final Widget? headerAction;
 
   @override
   Widget build(BuildContext context) {
@@ -30,7 +32,16 @@ class HomePanel extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(title, style: text.titleMedium),
+                if (headerAction case final trailing?)
+                  Row(
+                    children: [
+                      Expanded(child: Text(title, style: text.titleMedium)),
+                      const SizedBox(width: 8),
+                      trailing,
+                    ],
+                  )
+                else
+                  Text(title, style: text.titleMedium),
                 if (subtitle case final description?) ...[
                   const SizedBox(height: 3),
                   Text(description, style: text.bodySmall),

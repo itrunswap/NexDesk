@@ -3,50 +3,39 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../connection/desktop_settings.dart';
 import '../preview/native_preview.dart';
 import 'connection_password.dart';
 import 'floating_session_menu.dart';
-import 'host_controller.dart';
 import 'native_collaboration.dart';
 import 'native_desktop.dart';
 import 'remote_surface.dart';
+import 'session_status.dart';
 import 'session_tools.dart';
+import 'session_window.dart';
 
 class LanSessionScreen extends StatefulWidget {
   const LanSessionScreen({
     super.key,
     required this.native,
-    required this.address,
-    required this.port,
-    required this.viewer,
-    required this.settings,
-    this.saved = false,
-    this.host,
-    this.directoryOrigin,
+    required this.launch,
   });
 
   final NativeDesktop native;
-  final String address;
-  final int port;
-  final int viewer;
-  final DesktopSettings settings;
-  final bool saved;
-  final HostController? host;
-  final String? directoryOrigin;
+  final SessionWindowLaunch launch;
 
   @override
   State<LanSessionScreen> createState() => _LanSessionScreenState();
 }
 
-class _LanSessionScreenState extends State<LanSessionScreen> {
+class _LanSessionScreenState extends State<LanSessionScreen>
+    with WidgetsBindingObserver {
   final _focus = FocusNode(debugLabel: 'remote desktop');
   int? _viewer, _texture;
   Timer? _poll;
   String? _issue;
   PreviewState _frames = const PreviewState();
   DesktopInfo _info = const DesktopInfo();
-  late bool _canUseSaved = widget.saved;
+  late bool _canUseSaved = widget.launch.saved;
   bool _askingPassword = false;
   bool _qualityApplied = false;
   bool _switching = false;
@@ -54,13 +43,26 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
   SurfaceScale _scale = SurfaceScale.fit;
   bool _full = false;
   bool _menuOpen = false;
+  bool _controlPaused = false;
+  bool _confirmingClose = false;
+  bool _closing = false;
 
   @override
   void initState() {
     super.initState();
-    _viewer = widget.viewer;
+    WidgetsBinding.instance.addObserver(this);
+    SessionWindow.onCloseRequested(_confirmClose);
+    _viewer = widget.launch.viewer;
     _frames = const PreviewState(status: 1);
-    unawaited(_attach(widget.viewer));
+    unawaited(_attach(widget.launch.viewer));
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      _focus.unfocus();
+      _release();
+    }
   }
 
   Future<void> _reconnect() async {
@@ -71,15 +73,16 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
       target: _targetLabel,
       saved: _canUseSaved,
       offersCollaboration: widget.native.collaboration != null,
-      permissions: widget.settings.permissions,
+      permissions: widget.launch.settings.permissions,
     );
     _askingPassword = false;
     if (!mounted || password == null) return;
     final id = widget.native.connectTarget(
-      widget.address,
-      widget.port,
-      widget.directoryOrigin,
+      widget.launch.address,
+      widget.launch.port,
+      widget.launch.origin,
       password,
+      forceRelay: widget.launch.settings.forceRelay,
     );
     if (id == 0) {
       setState(() => _issue = '请输入六位连接密码。');
@@ -90,6 +93,7 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
       _issue = null;
       _frames = const PreviewState(status: 1);
       _qualityApplied = false;
+      _canUseSaved = password.remember;
     });
     await _attach(id);
   }
@@ -121,29 +125,15 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
     if (_viewer != id) return;
     final frames = widget.native.preview.inspect(id);
     final info = widget.native.inspect(id);
-    final error = switch (frames.status) {
-      1 || 2 || 9 || 11 || 12 => null,
-      3 => '会话已结束。',
-      4 => '配对失败，请核对连接密码。',
-      5 => '设备指纹已变化。请先核对被控电脑，再移除近期连接中的旧记录并重新连接。',
-      6 =>
-        widget.directoryOrigin == null
-            ? '无法连接。请检查主机监听、地址和端口。'
-            : '设备离线或目录无法访问。请检查 HTTPS 地址和设备 ID。',
-      8 => '被控端正在处理其他连接，请稍后重试。',
-      10 => '被控端拒绝了连接，或同意请求已超时。',
-      13 => '共享已停止，或重连授权已过期。',
-      14 => '没有可读的已保存密码，请手动输入。',
-      15 => '该端口未提供桌面互控。请核对被控电脑分享的 IP 和端口。',
-      16 => '采集源已关闭或系统权限不可用。',
-      _ => '视频或控制通道未能建立。',
-    };
+    final error = sessionError(
+      frames.status,
+      byId: widget.launch.origin != null,
+    );
     if (error != null) {
       if (frames.status == 14 || frames.status == 4) _canUseSaved = false;
       _stop(error);
       return;
     }
-    if (frames.status == 11) _qualityApplied = false;
     if (frames.status == 2 && !_qualityApplied) _applyDefaultQuality(id);
     if (_info.generation != info.generation ||
         _info.canInput && !info.canInput ||
@@ -160,9 +150,9 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
   }
 
   void _applyDefaultQuality(int viewer) {
-    final settings = widget.settings;
+    final quality = widget.launch.settings.videoQuality;
     final native = widget.native.collaboration;
-    if (native == null || (settings.quality == 'auto' && settings.fps == 30)) {
+    if (native == null || quality.isDefault) {
       _qualityApplied = true;
       return;
     }
@@ -170,14 +160,14 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
     _qualityApplied = true;
     unawaited(
       native
-          .remote(
-            viewer,
-            'quality',
-            fields: {
-              'quality': {'preset': settings.quality, 'fps': settings.fps},
-            },
-          )
-          .then<void>((_) {})
+          .setQuality(viewer, quality)
+          .then<void>((applied) {
+            if (mounted && _viewer == viewer && !applied.matches(quality)) {
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('被控端只应用了部分画质设置。')));
+            }
+          })
           .onError<CollaborationIssue>((_, _) {
             if (mounted && _viewer == viewer) {
               ScaffoldMessenger.of(context).showSnackBar(
@@ -198,7 +188,7 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
     _poll?.cancel();
     _switchTimeout?.cancel();
     _release();
-    if (_full) unawaited(_fullscreen(false));
+    if (_full && !_closing) unawaited(_fullscreen(false));
     if (_viewer case final viewer?) {
       unawaited(widget.native.preview.stop(viewer));
     }
@@ -211,6 +201,43 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
       _switching = false;
       _menuOpen = false;
     });
+  }
+
+  Future<void> _confirmClose() async {
+    if (_confirmingClose || _closing) return;
+    _confirmingClose = true;
+    _focus.unfocus();
+    _release();
+    try {
+      if (_viewer != null) {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('断开远程连接？'),
+            content: Text('将结束与 $_targetLabel 的当前会话。'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('继续会话'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('断开连接'),
+              ),
+            ],
+          ),
+        );
+        if (!mounted || confirmed != true) return;
+      }
+      _closing = true;
+      _stop();
+      if (!await SessionWindow.close() && mounted) {
+        _closing = false;
+        setState(() => _issue = '会话已结束，无法关闭此窗口，请使用系统关闭按钮。');
+      }
+    } finally {
+      _confirmingClose = false;
+    }
   }
 
   void _selectDisplay(String? display) {
@@ -238,10 +265,7 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
 
   void _shortcut(List<int> keys) {
     final viewer = _viewer;
-    if (viewer == null ||
-        !_info.canInput ||
-        _switching ||
-        _frames.status != 2) {
+    if (viewer == null || !_controlling || _switching || _frames.status != 2) {
       return;
     }
     for (final key in keys) {
@@ -283,6 +307,8 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    SessionWindow.onCloseRequested(null);
     _poll?.cancel();
     _switchTimeout?.cancel();
     _release();
@@ -298,9 +324,8 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
     super.dispose();
   }
 
-  String get _targetLabel => widget.directoryOrigin == null
-      ? LanTarget(widget.address, widget.port.toString()).endpoint
-      : widget.address;
+  String get _targetLabel => widget.launch.label;
+  bool get _controlling => _info.canInput && !_controlPaused;
 
   @override
   Widget build(BuildContext context) {
@@ -359,7 +384,7 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
             frameWidth: _frames.width,
             frameHeight: _frames.height,
             generation: _info.generation,
-            canInput: _info.canInput && !_switching,
+            canInput: _controlling && !_switching,
             scale: _scale,
           ),
         ),
@@ -483,7 +508,7 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
                   child: Text('缩放'),
                 ),
               ),
-              if (_info.canInput)
+              if (_controlling)
                 PopupMenuButton<List<int>>(
                   tooltip: '发送组合键',
                   onSelected: _shortcut,
@@ -506,6 +531,16 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
                     child: Text('组合键'),
                   ),
                 ),
+              if (_info.canInput)
+                TextButton.icon(
+                  onPressed: () {
+                    _release();
+                    setState(() => _controlPaused = !_controlPaused);
+                    _setMenu(false);
+                  },
+                  icon: const Icon(Icons.mouse_outlined),
+                  label: Text(_controlPaused ? '恢复控制' : '暂停控制'),
+                ),
               TextButton.icon(
                 onPressed: _toggleFullscreen,
                 icon: Icon(_full ? Icons.fullscreen_exit : Icons.fullscreen),
@@ -521,10 +556,13 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
               generation: _info.generation,
               frameWidth: _frames.width,
               frameHeight: _frames.height,
-              canInput: _info.canInput && !_switching,
+              canInput: _controlling && !_switching,
+              hasControlGrant: _info.canInput,
               release: _release,
               onModePreview: () => _setMenu(true),
-              downloadRoot: widget.settings.downloadRoot,
+              defaultQuality: widget.launch.settings.videoQuality,
+              scale: _scale,
+              downloadRoot: widget.launch.settings.downloadRoot,
             ),
         ],
         if (!active && _full)
@@ -536,39 +574,17 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
               label: const Text('退出全屏'),
             ),
           ),
-        if (widget.host case final host?)
-          ListenableBuilder(
-            listenable: host,
-            builder: (context, _) => host.peer == null
-                ? const SizedBox.shrink()
-                : Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton.icon(
-                      onPressed: host.revoke,
-                      icon: const Icon(Icons.stop_screen_share_outlined),
-                      label: const Text('撤销本机接收的会话'),
-                    ),
-                  ),
-          ),
         const Divider(height: 18),
-        OverflowBar(
-          alignment: MainAxisAlignment.spaceBetween,
-          spacing: 8,
-          overflowSpacing: 6,
-          children: [
-            TextButton(
-              onPressed: () => Navigator.maybePop(context),
-              child: const Text('返回首页'),
+        Align(
+          alignment: Alignment.centerRight,
+          child: OutlinedButton.icon(
+            onPressed: _confirmClose,
+            icon: const Icon(Icons.link_off_rounded, size: 18),
+            label: const Text('断开连接'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: theme.colorScheme.error,
             ),
-            OutlinedButton.icon(
-              onPressed: _stop,
-              icon: const Icon(Icons.link_off_rounded, size: 18),
-              label: const Text('结束会话'),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: theme.colorScheme.error,
-              ),
-            ),
-          ],
+          ),
         ),
       ],
     );
@@ -579,11 +595,9 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
     2 when _info.notice == 'display_changed' => '显示器发生变化，已切换到可用来源',
     2 when _info.notice == 'capture_unavailable' => '无法切换到该显示器',
     2 when _info.notice == 'input_unavailable' => '系统拒绝了键鼠权限，当前仅观看',
+    2 when _info.canInput && _controlPaused => '已连接 · 控制已暂停',
     2 => _info.canInput ? '已连接 · 可控制' : '已连接 · 仅观看',
-    9 => '等待被控端授权…',
-    11 => '连接已中断，正在恢复…',
-    12 => '等待确认设备身份',
-    _ => '正在配对并协商媒体…',
+    _ => sessionProgress(_frames.status),
   };
 
   Widget _login() => Center(
@@ -606,10 +620,7 @@ class _LanSessionScreenState extends State<LanSessionScreen> {
             spacing: 8,
             overflowSpacing: 6,
             children: [
-              TextButton(
-                onPressed: () => Navigator.maybePop(context),
-                child: const Text('返回首页'),
-              ),
+              TextButton(onPressed: _confirmClose, child: const Text('关闭窗口')),
               FilledButton(onPressed: _reconnect, child: const Text('重新连接')),
             ],
           ),

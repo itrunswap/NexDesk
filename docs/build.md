@@ -1,6 +1,6 @@
 # 各端运行与打包
 
-在仓库根目录运行各段命令，或按示例切换到对应子目录。Windows、Linux、Android 和自托管的 `0.1.4` 发行源码使用 `v0.1.4` 标签，macOS 修复版使用 `v0.1.5` 标签。桌面和移动版本取自 `apps/desktop/pubspec.yaml`，目录协议版本通过 `/healthz` 查看。
+在仓库根目录运行各段命令，或按示例切换到对应子目录。`0.1.10` 的各平台发行包使用 `v0.1.10` 标签对应的源码。桌面和移动版本取自 `apps/desktop/pubspec.yaml`，目录协议版本通过 `/healthz` 查看。[v0.1.10 发行包](https://github.com/itrunswap/NexDesk/releases/tag/v0.1.10)
 
 | 工具 | 版本与用途 |
 | --- | --- |

@@ -30,6 +30,10 @@ $sdkPath = (Resolve-Path -LiteralPath $FlutterRoot).Path
 $flutter = Join-Path $sdkPath 'bin\flutter.bat'
 $desktop = Join-Path $root 'apps\desktop'
 $runner = Join-Path $desktop 'windows\runner'
+$pubspec = Get-Content -LiteralPath (Join-Path $desktop 'pubspec.yaml') -Raw
+$version = [regex]::Match($pubspec, '(?m)^version:[ \t]*(?<name>(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(?:-[A-Za-z0-9.-]+)?)(?:\+(?<build>\d+))?[ \t]*(?:#[^\r\n]*)?\r?$')
+if (-not $version.Success) { throw 'Expected a version in apps/desktop/pubspec.yaml.' }
+$build = if ($version.Groups['build'].Success) { $version.Groups['build'].Value } else { '0' }
 $profile = $Configuration.ToLowerInvariant()
 $bundleName = if ($DesktopBundle) { $DesktopBundle } elseif ($Configuration -eq 'Release') { 'nexdesk-windows-x64-release' } elseif ($DartTarget -eq 'lib/main.dart') { 'm1-windows-x64' } else { 'm1-render-probe-x64' }
 $preview = Join-Path $desktop "build\$bundleName"
@@ -108,7 +112,17 @@ try {
 
     Set-Location -LiteralPath $runner
     $resource = Join-Path $objects 'runner.res'
-    & rc.exe /nologo /fo $resource Runner.rc
+    $versionedResource = Join-Path $objects 'VersionedRunner.rc'
+    $versionLines = @(
+        ('#define FLUTTER_VERSION_MAJOR {0}' -f $version.Groups['major'].Value),
+        ('#define FLUTTER_VERSION_MINOR {0}' -f $version.Groups['minor'].Value),
+        ('#define FLUTTER_VERSION_PATCH {0}' -f $version.Groups['patch'].Value),
+        ('#define FLUTTER_VERSION_BUILD {0}' -f $build),
+        ('#define FLUTTER_VERSION "{0}"' -f $version.Groups['name'].Value),
+        '#include "Runner.rc"'
+    )
+    [IO.File]::WriteAllLines($versionedResource, $versionLines)
+    & rc.exe /nologo /I $runner /fo $resource $versionedResource
     Check-NativeExit 'Runner resources'
 
     $cppFiles = @('flutter_window.cpp','main.cpp','preview_texture.cpp','utils.cpp','win32_window.cpp') |

@@ -34,6 +34,12 @@ pub enum SessionError {
     Busy,
     #[error("unable to reach the LAN host")]
     Unreachable,
+    #[error("the remote device is offline at this ID service")]
+    DeviceOffline,
+    #[error("the ID service or its signaling connection did not respond")]
+    DirectoryUnavailable,
+    #[error("this ID session requires an available TURN relay")]
+    RelayUnavailable,
     #[error("the LAN host returned an invalid response")]
     InvalidResponse,
     #[error(transparent)]
@@ -86,6 +92,7 @@ pub struct DesktopRequest<'a> {
     pub resume: Option<&'a str>,
     pub capabilities: Option<Capabilities>,
     pub controller: Option<&'a ControllerKey>,
+    pub force_relay: bool,
 }
 
 pub async fn connect_desktop<F: Future<Output = bool>>(
@@ -147,6 +154,11 @@ pub async fn connect_routed<F: Future<Output = bool>>(
     let remote = RemoteIdentity::new(&origin, &device);
     let directory = DirectoryClient::new(origin).map_err(directory_error)?;
     let route = directory.open(&device).await.map_err(directory_error)?;
+    let mut ice = route.ice.clone();
+    ice.relay_only |= options.force_relay;
+    if !ice.valid() {
+        return Err(SessionError::RelayUnavailable);
+    }
     let (client, request) = ClientPairing::start(code)?;
     let challenge: LoginChallenge = directory
         .pair(&route, PairStep::Start, &request)
@@ -155,7 +167,13 @@ pub async fn connect_routed<F: Future<Output = bool>>(
     let shell = options
         .capabilities
         .is_some_and(|bits| bits.includes(Capabilities::SHELL));
-    let rtc = ControllerOffer::routed(ice_options(route.ice.clone()), shell).await?;
+    let relay_only = ice.relay_only;
+    let rtc = ControllerOffer::routed(ice_options(ice), shell)
+        .await
+        .map_err(|error| match error {
+            MediaError::IceTimeout if relay_only => SessionError::RelayUnavailable,
+            error => SessionError::Media(error),
+        })?;
     let options = DesktopRequest {
         capabilities: Some(options.capabilities.unwrap_or_default()),
         ..options
@@ -197,7 +215,8 @@ pub fn ice_options(ice: IceConfiguration) -> IceOptions {
 
 fn directory_error(error: DirectoryError) -> SessionError {
     match error {
-        DirectoryError::Offline | DirectoryError::Unreachable => SessionError::Unreachable,
+        DirectoryError::Offline => SessionError::DeviceOffline,
+        DirectoryError::Unreachable => SessionError::DirectoryUnavailable,
         DirectoryError::Declined => SessionError::Declined,
         DirectoryError::Busy => SessionError::Busy,
         DirectoryError::Expired => SessionError::ResumeExpired,

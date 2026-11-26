@@ -1,21 +1,27 @@
 #include "flutter_window.h"
 
 #include <shellapi.h>
+#include <winver.h>
 
 #include <array>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <flutter/standard_method_codec.h>
 
 #include "flutter/generated_plugin_registrant.h"
 #include "resource.h"
 
+#pragma comment(lib, "version.lib")
+
 namespace {
 constexpr wchar_t kPreferences[] = L"Software\\NexDesk";
 constexpr wchar_t kLoginItems[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr UINT kTrayId = 1;
 constexpr UINT kTrayEvent = WM_APP + 61;
+constexpr UINT kCloseSession = WM_APP + 62;
+constexpr UINT kSessionClosed = WM_APP + 63;
 constexpr UINT kOpen = 1;
 constexpr UINT kExit = 2;
 
@@ -38,12 +44,36 @@ bool StoreTrayPreference(bool enabled) {
   return result == ERROR_SUCCESS;
 }
 
-std::wstring StartupCommand() {
+std::wstring ExecutablePath() {
   std::array<wchar_t, 32768> path{};
   const DWORD length = GetModuleFileNameW(nullptr, path.data(),
                                          static_cast<DWORD>(path.size()));
   if (length == 0 || length >= path.size()) return {};
-  return L"\"" + std::wstring(path.data(), length) + L"\"";
+  return std::wstring(path.data(), length);
+}
+
+std::wstring StartupCommand() {
+  const auto path = ExecutablePath();
+  return path.empty() ? std::wstring{} : L"\"" + path + L"\"";
+}
+
+std::string ApplicationVersion() {
+  const auto path = ExecutablePath();
+  if (path.empty()) return {};
+  const DWORD length = GetFileVersionInfoSizeW(path.c_str(), nullptr);
+  if (length == 0) return {};
+  std::vector<BYTE> data(length);
+  if (!GetFileVersionInfoW(path.c_str(), 0, length, data.data())) return {};
+
+  void* value = nullptr;
+  UINT size = 0;
+  if (!VerQueryValueW(data.data(), L"\\", &value, &size) || !value ||
+      size < sizeof(VS_FIXEDFILEINFO)) return {};
+  const auto* info = static_cast<const VS_FIXEDFILEINFO*>(value);
+  if (info->dwSignature != VS_FFI_SIGNATURE) return {};
+  return std::to_string(HIWORD(info->dwProductVersionMS)) + "." +
+         std::to_string(LOWORD(info->dwProductVersionMS)) + "." +
+         std::to_string(HIWORD(info->dwProductVersionLS));
 }
 
 bool StartsAtLogin() {
@@ -69,12 +99,32 @@ bool ConfigureStartup(bool enabled) {
   RegCloseKey(key);
   return status == ERROR_SUCCESS;
 }
+
+int64_t SessionId(const flutter::EncodableValue* value) {
+  if (!value) return 0;
+  if (const auto* id = std::get_if<int64_t>(value)) return *id;
+  if (const auto* id = std::get_if<int32_t>(value)) return *id;
+  return 0;
+}
+
+std::wstring SessionTitle(const std::string& text) {
+  if (text.empty() || text.size() > 1024) return {};
+  const int length = static_cast<int>(text.size());
+  const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                        text.data(), length, nullptr, 0);
+  if (count <= 0) return {};
+  std::wstring output(count, L'\0');
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), length,
+                      output.data(), count);
+  return output;
+}
 }  // namespace
 
-FlutterWindow::FlutterWindow(const flutter::DartProject& project)
-    : project_(project) {}
+FlutterWindow::FlutterWindow(const flutter::DartProject& project,
+                             FlutterWindow* home, int64_t session_id)
+    : project_(project), home_(home), session_id_(session_id) {}
 
-FlutterWindow::~FlutterWindow() {}
+FlutterWindow::~FlutterWindow() { Destroy(); }
 
 bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
@@ -96,9 +146,12 @@ bool FlutterWindow::OnCreate() {
                         ->GetRegistrar<flutter::PluginRegistrarWindows>(
                             flutter_controller_->engine()->GetRegistrarForPlugin("NexDeskM1"));
   preview_texture_ = std::make_unique<PreviewTexture>(registrar, GetHandle());
-  taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
-  ConfigureTray(TrayPreference());
-  RegisterBackgroundChannel();
+  if (!home_) {
+    taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
+    ConfigureTray(TrayPreference());
+    RegisterBackgroundChannel();
+  }
+  RegisterSessionChannel();
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -114,6 +167,12 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (home_ && session_channel_ && home_->GetHandle()) {
+    PostMessageW(home_->GetHandle(), kSessionClosed,
+                 static_cast<WPARAM>(session_id_), 0);
+  }
+  session_channel_.reset();
+  sessions_.clear();
   ConfigureTray(false);
   background_channel_.reset();
   preview_texture_.reset();
@@ -122,6 +181,64 @@ void FlutterWindow::OnDestroy() {
   }
 
   Win32Window::OnDestroy();
+}
+
+void FlutterWindow::RegisterSessionChannel() {
+  session_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "dev.nexdesk/session_window",
+      &flutter::StandardMethodCodec::GetInstance());
+  session_channel_->SetMethodCallHandler([this](const auto& call, auto result) {
+    const auto& method = call.method_name();
+    bool success = false;
+    if (!home_ && method == "open") {
+      success = OpenSession(call.arguments());
+    } else if (!home_ && (method == "focus" || method == "requestClose")) {
+      success = FocusSession(SessionId(call.arguments()), method == "requestClose");
+    } else if (home_ && method == "close") {
+      // Let the channel reply before the message loop destroys this engine.
+      success = PostMessageW(GetHandle(), kCloseSession, 0, 0) != 0;
+    } else {
+      result->NotImplemented();
+      return;
+    }
+    result->Success(flutter::EncodableValue(success));
+  });
+}
+
+bool FlutterWindow::OpenSession(const flutter::EncodableValue* arguments) {
+  if (!arguments) return false;
+  const auto* map = std::get_if<flutter::EncodableMap>(arguments);
+  if (!map) return false;
+  const auto id_entry = map->find(flutter::EncodableValue("id"));
+  const auto title_entry = map->find(flutter::EncodableValue("title"));
+  const auto launch_entry = map->find(flutter::EncodableValue("launch"));
+  if (id_entry == map->end() || title_entry == map->end() ||
+      launch_entry == map->end()) return false;
+  const auto id = SessionId(&id_entry->second);
+  const auto* title = std::get_if<std::string>(&title_entry->second);
+  const auto* launch = std::get_if<std::string>(&launch_entry->second);
+  if (id <= 0 || !title || !launch || launch->empty() || launch->size() > 16384 ||
+      sessions_.count(id)) return false;
+  const auto name = SessionTitle(*title);
+  if (name.empty()) return false;
+
+  flutter::DartProject project(project_);
+  project.set_dart_entrypoint_arguments({"--nexdesk-session-window", *launch});
+  auto window = std::make_unique<FlutterWindow>(project, this, id);
+  const auto offset = 40 + static_cast<unsigned int>(sessions_.size() % 8) * 26;
+  if (!window->Create(name, Point(offset, offset), Size(1060, 720))) return false;
+  sessions_.emplace(id, std::move(window));
+  return true;
+}
+
+bool FlutterWindow::FocusSession(int64_t id, bool request_close) {
+  const auto item = sessions_.find(id);
+  if (item == sessions_.end()) return false;
+  const auto window = item->second->GetHandle();
+  if (!window) return false;
+  ShowWindow(window, IsIconic(window) ? SW_RESTORE : SW_SHOW);
+  SetForegroundWindow(window);
+  return !request_close || PostMessageW(window, WM_CLOSE, 0, 0) != 0;
 }
 
 bool FlutterWindow::ConfigureTray(bool enabled) {
@@ -169,6 +286,12 @@ void FlutterWindow::RegisterBackgroundChannel() {
       &flutter::StandardMethodCodec::GetInstance());
   background_channel_->SetMethodCallHandler([this](const auto& call, auto result) {
     const auto& name = call.method_name();
+    if (name == "appVersion") {
+      const auto version = ApplicationVersion();
+      if (version.empty()) result->Success();
+      else result->Success(flutter::EncodableValue(version));
+      return;
+    }
     if (name == "status") {
       result->Success(flutter::EncodableValue(flutter::EncodableMap{
         {flutter::EncodableValue("traySupported"), flutter::EncodableValue(true)},
@@ -201,9 +324,31 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
-  if (message == WM_CLOSE && tray_enabled_) {
-    ShowWindow(hwnd, SW_HIDE);
+  if (message == kCloseSession && home_) {
+    DestroyWindow(hwnd);
     return 0;
+  }
+  if (message == kSessionClosed && !home_) {
+    const auto id = static_cast<int64_t>(wparam);
+    const auto item = sessions_.find(id);
+    if (item != sessions_.end() && !item->second->GetHandle()) {
+      sessions_.erase(item);
+      if (session_channel_) {
+        session_channel_->InvokeMethod(
+            "closed", std::make_unique<flutter::EncodableValue>(id));
+      }
+    }
+    return 0;
+  }
+  if (message == WM_CLOSE) {
+    if (home_ && session_channel_) {
+      session_channel_->InvokeMethod("requestClose", nullptr);
+      return 0;
+    }
+    if (!home_ && (tray_enabled_ || !sessions_.empty())) {
+      ShowWindow(hwnd, tray_enabled_ ? SW_HIDE : SW_MINIMIZE);
+      return 0;
+    }
   }
   if (message == kTrayEvent && wparam == kTrayId) {
     if (lparam == WM_RBUTTONUP) ShowTrayMenu(hwnd);
@@ -234,7 +379,7 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
 
   switch (message) {
     case WM_FONTCHANGE:
-      flutter_controller_->engine()->ReloadSystemFonts();
+      if (flutter_controller_) flutter_controller_->engine()->ReloadSystemFonts();
       break;
   }
 

@@ -17,10 +17,10 @@ pub use capture::{
 pub use channel::{CONTROL_PACKET_LIMIT, ControlPipe};
 pub use libwebrtc::peer_connection_factory::IceServer;
 pub use peer::{
-    Codec, ControllerOffer, DesktopPipes, HostMedia, HostPeer, IceOptions, IcePathStats,
-    MediaConfig, MediaStats, PixelFrame, View,
+    Codec, ControllerOffer, DesktopMediaSettings, DesktopPipes, EncodingPreference, HostMedia,
+    HostPeer, IceOptions, IcePathStats, MediaConfig, MediaStats, PixelFrame, VideoLimitation, View,
 };
-pub use quality::{Preset, Quality};
+pub use quality::{FrameSize, Preset, Quality, ResolutionLimit};
 pub use sound::{ReceivedSound, SoundStatus};
 
 #[derive(Debug, thiserror::Error)]

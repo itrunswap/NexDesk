@@ -256,10 +256,13 @@ final class HostController extends ChangeNotifier {
   bool affectsCurrentSession(DesktopSettings config) {
     final mode = _activeDirectory ?? _approvingDirectory ?? request?.directory;
     if (mode == null) return false;
+    final approvalChanges = config.approvalPolicy != settings.approvalPolicy;
     if (_sourceFor(config) != _sourceFor(settings) ||
         config.shareRoot != settings.shareRoot ||
         !config.permissions.incoming.permits(settings.permissions.incoming) ||
-        unattendedSession && config.approvalPolicy != settings.approvalPolicy) {
+        approvalChanges &&
+            (unattendedSession ||
+                config.approvalPolicy == ApprovalPolicy.trustedOnly)) {
       return true;
     }
     if (mode) {

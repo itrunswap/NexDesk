@@ -59,6 +59,8 @@ const void *nexdesk_m1_acquire_frame(uint64_t id,
 void nexdesk_m1_release_frame(const void *frame);
 
 /* M2 viewer IDs also use the status, disconnect and texture operations above.
+ * Routed connection errors include 17 (device offline), 18 (directory unavailable), and 19 (TURN unavailable).
+ * Status 20 means the local device authorization key could not be loaded or created.
  * flags: 1 requests control, 2 remembers the credential, 4 uses a stored credential.
  * 16 accepts a password-authenticated host on first use when identity storage is available.
  * An existing host identity is always verified. Flag 8 uses device authorization with M3/M4.
@@ -87,7 +89,9 @@ uint64_t nexdesk_m3_request(uint64_t id, const uint8_t *request, size_t length);
 size_t nexdesk_m3_poll(uint64_t id, uint64_t request, uint8_t *output, size_t capacity);
 size_t nexdesk_m3_info(uint64_t id, uint8_t *output, size_t capacity);
 
-/* ID connection request JSON contains origin, device, code, flags and capabilities. */
+/* ID connection request JSON contains origin, device, code, flags, capabilities,
+ * and an optional force_relay boolean that defaults to false.
+ */
 uint64_t nexdesk_m4_connect(const uint8_t *request, size_t length);
 
 #ifdef __cplusplus

@@ -128,8 +128,9 @@ final class NativeDesktop {
     String address,
     int port,
     String? origin,
-    ConnectionPassword password,
-  ) => origin == null
+    ConnectionPassword password, {
+    bool forceRelay = false,
+  }) => origin == null
       ? connect(
           address,
           port,
@@ -151,6 +152,7 @@ final class NativeDesktop {
           capabilities: password.capabilities,
           deviceAuthorization: password.deviceAuthorization,
           autoConfirmIdentity: true,
+          forceRelay: forceRelay,
         );
 
   int connectDirectory(
@@ -163,6 +165,7 @@ final class NativeDesktop {
     required int capabilities,
     bool deviceAuthorization = false,
     bool autoConfirmIdentity = false,
+    bool forceRelay = false,
   }) {
     final connect = _directory;
     if (connect == null || (!stored && code.length != 6)) return 0;
@@ -178,6 +181,7 @@ final class NativeDesktop {
             (deviceAuthorization ? 8 : 0) |
             (autoConfirmIdentity ? _autoConfirmIdentity : 0),
         'capabilities': capabilities,
+        if (forceRelay) 'force_relay': true,
       }),
     );
     try {
@@ -322,14 +326,16 @@ Object? _localOperation(String path, Map<String, Object?> request) {
       >('nexdesk_m2_local');
   final bytes = utf8.encode(jsonEncode(request));
   return using((arena) {
-    const capacity = 32768;
+    const standardCapacity = 32768;
+    final capacity = request['operation'] == 'directory_recent'
+        ? 65536
+        : standardCapacity;
     final result = arena<ffi.Uint8>(capacity);
-    final count = exchange(
-      _bytes(arena, bytes),
-      bytes.length,
-      result,
-      capacity,
-    );
+    final input = _bytes(arena, bytes);
+    var count = exchange(input, bytes.length, result, standardCapacity);
+    if (count == 0 && capacity > standardCapacity) {
+      count = exchange(input, bytes.length, result, capacity);
+    }
     if (count == 0) throw StateError('本机设置请求无效。');
     final reply = _decode(result, count);
     if (reply.containsKey('error')) throw StateError('无法访问本机设置或系统凭据。');
@@ -400,6 +406,7 @@ final class RecentDevice {
     required this.port,
     required this.label,
     required this.remembered,
+    this.group = '',
     this.origin,
   });
   factory RecentDevice.fromJson(Map json) => RecentDevice(
@@ -408,6 +415,7 @@ final class RecentDevice {
     port: json['port'] as int,
     label: json['label'] as String,
     remembered: json['remembered'] == true,
+    group: json['group'] as String? ?? '',
   );
   factory RecentDevice.fromDirectory(Map json) => RecentDevice(
     endpoint: "${json['device']} · ${json['origin']}",
@@ -415,9 +423,10 @@ final class RecentDevice {
     port: 0,
     label: json['label'] as String,
     remembered: json['remembered'] == true,
+    group: json['group'] as String? ?? '',
     origin: json['origin'] as String,
   );
-  final String endpoint, address, label;
+  final String endpoint, address, label, group;
   final String? origin;
   final int port;
   final bool remembered;

@@ -11,6 +11,9 @@ import 'desktop_settings.dart';
 import 'directory_origin.dart';
 import 'permission_profile_picker.dart';
 import 'session_permissions.dart';
+import 'settings_section.dart';
+import 'video_quality.dart';
+import 'video_quality_fields.dart';
 
 class SettingsDialog extends StatefulWidget {
   const SettingsDialog({super.key, required this.host, this.directory});
@@ -28,53 +31,60 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late final _defaultOrigin = normalizeDirectoryOrigin(
     widget.host.defaultDirectory,
   );
-  late final _origin = Uri.tryParse(
-    _historyOrigin != null && _historyOrigin != _defaultOrigin
-        ? _historyOrigin
-        : _initial.directory,
-  );
-  late final _server = TextEditingController(text: _editHost(_origin));
-  late final _httpsPort = TextEditingController(
-    text: _origin?.hasPort == true ? _origin!.port.toString() : '',
-  );
+  late String _directory =
+      _historyOrigin != null && _historyOrigin != _defaultOrigin
+      ? _historyOrigin
+      : _initial.directory;
   late final _lanPort = TextEditingController(text: _initial.port.toString());
   late final _shared = TextEditingController(text: _initial.shareRoot);
   late final _downloads = TextEditingController(text: _initial.downloadRoot);
   late bool _selfHosted = _historyOrigin == null
       ? _initial.useSelfHosted
       : _historyOrigin != _defaultOrigin;
+  late bool _forceRelay = _initial.forceRelay;
   late bool _lan = _initial.lanAllowed, _shell = _initial.allowShell;
   late ApprovalPolicy _approvalPolicy = _initial.approvalPolicy;
   late bool _deviceAuthorization = _initial.permissions.deviceAuthorization;
   late SessionPermissions _outgoing = _initial.permissions.outgoing;
   late SessionPermissions _incoming = _initial.permissions.incoming;
   late String _address = _initial.address, _source = _initial.source;
-  late String _quality = _initial.quality;
-  late int _fps = _initial.fps;
+  late VideoQuality _quality = _initial.videoQuality;
+  late DesktopVideoCodec _codec = _initial.videoCodec;
+  late bool _softwareEncoding = _initial.softwareEncoding;
   String? _error, _testStatus;
   bool _saving = false, _testing = false, _refreshing = false;
 
-  static String _editHost(Uri? uri) {
-    if (uri == null || !uri.hasAuthority) return '';
-    if (uri.scheme == 'http') return uri.origin;
-    return uri.host.contains(':') ? '[${uri.host}]' : uri.host;
+  String? get _testOrigin =>
+      _selfHosted ? normalizeDirectoryOrigin(_directory) : _defaultOrigin;
+
+  Future<void> _editDirectory({bool enable = false}) async {
+    final result = await showDialog<String>(
+      context: context,
+      builder: (_) => _SelfHostedDialog(origin: _directory),
+    );
+    if (!mounted || result == null) return;
+    setState(() {
+      _directory = result;
+      _selfHosted = enable || _selfHosted;
+      _testStatus = null;
+      _error = null;
+    });
   }
 
-  String? get _editedOrigin =>
-      directoryOriginFromFields(_server.text, _httpsPort.text);
-
-  String? get _testOrigin => _selfHosted
-      ? _editedOrigin
-      : normalizeDirectoryOrigin(widget.host.defaultDirectory);
+  Future<void> _toggleSelfHosted(bool value) async {
+    if (value && normalizeDirectoryOrigin(_directory) == null) {
+      await _editDirectory(enable: true);
+      return;
+    }
+    setState(() {
+      _selfHosted = value;
+      _testStatus = null;
+    });
+  }
 
   Future<void> _test() async {
     final origin = _testOrigin;
-    if (origin == null) {
-      setState(
-        () => _testStatus = _selfHosted ? '请填写有效的服务器地址和端口。' : '此版本尚未配置默认服务。',
-      );
-      return;
-    }
+    if (origin == null) return;
     setState(() {
       _testing = true;
       _testStatus = null;
@@ -92,8 +102,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
   Future<void> _save() async {
     if (_saving) return;
     final port = int.tryParse(_lanPort.text.trim());
-    final origin = _editedOrigin;
-    if (port == null || port < 1 || port > 65535) {
+    final validPort = port != null && port >= 1 && port <= 65535;
+    final origin = normalizeDirectoryOrigin(_directory);
+    if (_lan && !validPort) {
       setState(() => _error = '本机监听端口须为 1–65535。');
       return;
     }
@@ -103,17 +114,22 @@ class _SettingsDialogState extends State<SettingsDialog> {
     }
     final value = DesktopSettings(
       useSelfHosted: _selfHosted,
-      directory: origin ?? _initial.directory,
+      directory: origin ?? '',
+      forceRelay: _forceRelay,
       lanAllowed: _lan,
       address: _address,
-      port: port,
+      port: validPort ? port : _initial.port,
       source: _source,
       shareRoot: _shared.text.trim(),
       allowShell: _shell,
       approvalPolicy: _approvalPolicy,
       downloadRoot: _downloads.text.trim(),
-      quality: _quality,
-      fps: _fps,
+      quality: _quality.profile.name,
+      fps: _quality.fps,
+      streamResolution: _quality.resolution,
+      maxVideoMbps: _quality.maxMbps,
+      videoCodec: _codec,
+      softwareEncoding: _softwareEncoding,
       permissions: DesktopPermissions(
         outgoing: _outgoing,
         incoming: _incoming,
@@ -181,8 +197,6 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   @override
   void dispose() {
-    _server.dispose();
-    _httpsPort.dispose();
     _lanPort.dispose();
     _shared.dispose();
     _downloads.dispose();
@@ -198,7 +212,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
         width: 590,
         height: math.min(625, MediaQuery.sizeOf(context).height - 36),
         child: DefaultTabController(
-          length: 6,
+          length: 4,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -212,11 +226,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
               const TabBar(
                 labelPadding: EdgeInsets.symmetric(horizontal: 8),
                 tabs: [
-                  Tab(text: '连接'),
+                  Tab(text: '常规'),
                   Tab(text: '权限'),
                   Tab(text: '共享'),
-                  Tab(text: '画面'),
-                  Tab(text: '存储'),
                   Tab(text: '维护'),
                 ],
               ),
@@ -225,19 +237,23 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   ignoring: _saving,
                   child: TabBarView(
                     children: [
-                      _page(_network()),
-                      _page(_permissionSettings()),
-                      _page(_sharing()),
-                      _page(_video()),
-                      _page(_storage()),
+                      _page('general', [
+                        _idService(),
+                        _lanListener(),
+                        _video(),
+                        _storage(),
+                      ]),
+                      _page('permissions', _permissionSettings()),
+                      _page('sharing', _sharing()),
                       DesktopMaintenance(host: widget.host),
                     ],
                   ),
                 ),
               ),
+              const Divider(height: 1),
               if (_error case final error?)
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
                   child: Semantics(
                     liveRegion: true,
                     child: Text(
@@ -275,57 +291,64 @@ class _SettingsDialogState extends State<SettingsDialog> {
     ),
   );
 
-  Widget _page(List<Widget> children) =>
-      ListView(padding: const EdgeInsets.all(20), children: children);
+  Widget _page(String key, List<Widget> children) => ListView(
+    key: PageStorageKey(key),
+    padding: const EdgeInsets.fromLTRB(18, 16, 18, 0),
+    children: children,
+  );
 
-  List<Widget> _network() {
-    final host = widget.host;
-    final defaultOrigin = normalizeDirectoryOrigin(host.defaultDirectory);
-    return [
-      _heading('ID 服务'),
+  Widget _idService() => SettingsSection(
+    title: 'ID 服务',
+    children: [
       SwitchListTile(
         contentPadding: EdgeInsets.zero,
+        dense: true,
         title: const Text('使用自托管服务'),
         value: _selfHosted,
-        onChanged: (value) => setState(() {
-          _selfHosted = value;
-          _testStatus = null;
-        }),
+        onChanged: _toggleSelfHosted,
       ),
-      if (_selfHosted) ...[
-        TextField(
-          key: const ValueKey('directory-server'),
-          controller: _server,
-          decoration: const InputDecoration(
-            labelText: '服务器地址',
-            hintText: 'desk.example.test',
-          ),
-          onChanged: (_) => setState(() => _testStatus = null),
-        ),
-        const SizedBox(height: 12),
-        _numberField(
-          _httpsPort,
-          '信令 HTTPS 端口',
-          hint: '443',
-          onChanged: (_) => setState(() => _testStatus = null),
-        ),
-      ] else
-        Text(defaultOrigin ?? '此版本尚未配置默认服务。'),
+      const Divider(height: 1),
+      const SizedBox(height: 9),
+      _note(_testOrigin ?? (_selfHosted ? '尚未填写自托管地址' : '尚未配置默认 ID 服务')),
       const SizedBox(height: 8),
-      Align(
-        alignment: Alignment.centerLeft,
-        child: OutlinedButton(
-          onPressed: _testing ? null : _test,
-          child: Text(_testing ? '正在测试…' : '测试连接'),
-        ),
+      Wrap(
+        spacing: 8,
+        runSpacing: 4,
+        children: [
+          OutlinedButton(
+            onPressed: () => _editDirectory(),
+            child: const Text('编辑自托管'),
+          ),
+          OutlinedButton(
+            onPressed: _testing || _testOrigin == null ? null : _test,
+            child: Text(_testing ? '正在测试…' : '测试连接'),
+          ),
+        ],
       ),
-      if (_testStatus case final status?)
-        Semantics(liveRegion: true, child: Text(status)),
-      const SizedBox(height: 22),
-      _heading('IP 直连'),
+      if (_testStatus case final status?) ...[
+        const SizedBox(height: 6),
+        Semantics(liveRegion: true, child: _note(status)),
+      ],
+      const SizedBox(height: 8),
+      const Divider(height: 1),
       SwitchListTile(
         contentPadding: EdgeInsets.zero,
-        title: const Text('允许此电脑通过局域网被连接'),
+        dense: true,
+        title: const Text('仅通过 TURN 中继'),
+        subtitle: const Text('用于本机新发起的 ID 连接。关闭时按 ID 服务配置自动选路。'),
+        value: _forceRelay,
+        onChanged: (value) => setState(() => _forceRelay = value),
+      ),
+    ],
+  );
+
+  Widget _lanListener() => SettingsSection(
+    title: 'IP 直连',
+    children: [
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        dense: true,
+        title: const Text('允许局域网设备连接本机'),
         value: _lan,
         onChanged: (value) => setState(() => _lan = value),
       ),
@@ -334,15 +357,17 @@ class _SettingsDialogState extends State<SettingsDialog> {
         _address,
         {
           '': '自动选择私网地址',
-          for (final address in host.interfaces) address: address,
-          if (_address.isNotEmpty && !host.interfaces.contains(_address))
+          for (final address in widget.host.interfaces) address: address,
+          if (_address.isNotEmpty && !widget.host.interfaces.contains(_address))
             _address: '$_address（当前不可用）',
         },
         (value) => setState(() => _address = value),
         enabled: _lan,
       ),
+      const SizedBox(height: 6),
+      _note('自动模式选择一个可用的私网地址。'),
       const SizedBox(height: 12),
-      _numberField(_lanPort, '本机监听端口', enabled: _lan),
+      _PortField(controller: _lanPort, label: '本机监听端口', enabled: _lan),
       Align(
         alignment: Alignment.centerLeft,
         child: TextButton(
@@ -350,125 +375,178 @@ class _SettingsDialogState extends State<SettingsDialog> {
           child: const Text('刷新网卡和显示器'),
         ),
       ),
-    ];
-  }
+    ],
+  );
 
   List<Widget> _permissionSettings() => [
-    _heading('作为主控端'),
-    const SizedBox(height: 12),
-    PermissionProfilePicker(
-      label: '默认请求权限',
-      value: _outgoing,
-      onChanged: (value) => setState(() => _outgoing = value),
+    SettingsSection(
+      title: '作为主控端',
+      children: [
+        const SizedBox(height: 4),
+        PermissionProfilePicker(
+          label: '默认请求权限',
+          value: _outgoing,
+          onChanged: (value) => setState(() => _outgoing = value),
+        ),
+        const SizedBox(height: 8),
+        const Divider(height: 1),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          title: const Text('使用本机设备授权'),
+          subtitle: const Text('连接时提供本机身份，供远端匹配已授权的设备。'),
+          value: _deviceAuthorization,
+          onChanged: (value) => setState(() => _deviceAuthorization = value),
+        ),
+      ],
     ),
-    SwitchListTile(
-      contentPadding: EdgeInsets.zero,
-      title: const Text('使用本机设备授权'),
-      subtitle: const Text('被控电脑信任本机后，可按已批准的权限免确认连接。'),
-      value: _deviceAuthorization,
-      onChanged: (value) => setState(() => _deviceAuthorization = value),
+    SettingsSection(
+      title: '作为被控端',
+      children: [
+        const SizedBox(height: 4),
+        PermissionProfilePicker(
+          label: '允许的权限上限',
+          value: _incoming,
+          onChanged: (value) => setState(() => _incoming = value),
+        ),
+        const SizedBox(height: 8),
+        _note('来访只会获得双方都允许且本机支持的功能。'),
+      ],
     ),
-    const Divider(height: 24),
-    _heading('作为被控端'),
-    const SizedBox(height: 12),
-    PermissionProfilePicker(
-      label: '允许的权限上限',
-      value: _incoming,
-      onChanged: (value) => setState(() => _incoming = value),
-    ),
-    const SizedBox(height: 8),
-    const Text('来访只会获得双方都允许且本机支持的功能。文件访问限于设置的共享目录。'),
   ];
 
   List<Widget> _sharing() => [
-    _heading('接入确认'),
-    _choice(
-      '接入方式',
-      _approvalPolicy.value,
-      {for (final policy in ApprovalPolicy.values) policy.value: policy.label},
-      (value) =>
-          setState(() => _approvalPolicy = ApprovalPolicy.fromValue(value)),
-    ),
-    const SizedBox(height: 8),
-    Text(_approvalPolicy.description),
-    ListTile(
-      contentPadding: EdgeInsets.zero,
-      title: const Text('管理可信设备'),
-      trailing: const Icon(Icons.chevron_right),
-      onTap: () => showDialog<void>(
-        context: context,
-        builder: (_) => TrustedDevicesDialog(host: widget.host),
-      ),
-    ),
-    const Divider(height: 24),
-    _heading('被控电脑'),
-    const SizedBox(height: 12),
-    _choice('初始共享来源', _source, {
-      '': '自动选择显示器',
-      for (final source in widget.host.sources) source.id: source.label,
-      if (_source.isNotEmpty &&
-          !widget.host.sources.any((source) => source.id == _source))
-        _source: '之前的显示器暂不可用',
-    }, (value) => setState(() => _source = value)),
-    const SizedBox(height: 12),
-    _folder(_shared, '被控端文件共享目录'),
-    const SizedBox(height: 8),
-    const Text('远程访问此目录需要被控端批准文件权限。留空时不提供文件共享。'),
-    if (Platform.isMacOS)
-      Align(
-        alignment: Alignment.centerLeft,
-        child: TextButton(
-          onPressed: widget.host.requestSystemPermissions,
-          child: const Text('申请系统录屏与辅助功能权限'),
+    SettingsSection(
+      title: '接入与可信设备',
+      children: [
+        const SizedBox(height: 4),
+        _choice(
+          '接入方式',
+          _approvalPolicy.value,
+          {
+            for (final policy in ApprovalPolicy.values)
+              policy.value: policy.label,
+          },
+          (value) =>
+              setState(() => _approvalPolicy = ApprovalPolicy.fromValue(value)),
         ),
-      ),
-    ExpansionTile(
-      tilePadding: EdgeInsets.zero,
-      title: const Text('高级权限'),
+        const SizedBox(height: 8),
+        _note(_approvalPolicy.description),
+        if (_approvalPolicy == ApprovalPolicy.trustedOnly) ...[
+          const SizedBox(height: 6),
+          _note('添加新设备时，先使用「可信设备免确认」，在下一次来访时批准并保存设备授权。'),
+        ],
+        const SizedBox(height: 8),
+        const Divider(height: 1),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          title: const Text('管理可信设备'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => showDialog<void>(
+            context: context,
+            builder: (_) => TrustedDevicesDialog(host: widget.host),
+          ),
+        ),
+      ],
+    ),
+    SettingsSection(
+      title: '屏幕与文件共享',
+      children: [
+        const SizedBox(height: 4),
+        _choice('初始共享来源', _source, {
+          '': '自动选择显示器',
+          for (final source in widget.host.sources) source.id: source.label,
+          if (_source.isNotEmpty &&
+              !widget.host.sources.any((source) => source.id == _source))
+            _source: '之前的显示器暂不可用',
+        }, (value) => setState(() => _source = value)),
+        if (Platform.isMacOS)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: widget.host.requestSystemPermissions,
+              child: const Text('申请系统录屏与辅助功能权限'),
+            ),
+          ),
+        const SizedBox(height: 12),
+        _folder(_shared, '被控端文件共享目录'),
+        const SizedBox(height: 8),
+        _note('远端在获得文件权限后可访问此目录。留空时关闭文件共享。'),
+      ],
+    ),
+    SettingsSection(
+      title: '高级权限',
       children: [
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
+          dense: true,
           title: const Text('允许在 ID 连接中请求远程 Shell'),
-          subtitle: const Text('每次都在这台电脑单独批准。'),
-          value: _shell,
-          onChanged: (value) => setState(() => _shell = value),
+          subtitle: Text(
+            _approvalPolicy == ApprovalPolicy.trustedOnly
+                ? '仅允许已授权设备时，关闭远程 Shell 请求。'
+                : '每次都在这台电脑单独批准。',
+          ),
+          value: _shell && _approvalPolicy != ApprovalPolicy.trustedOnly,
+          onChanged: _approvalPolicy == ApprovalPolicy.trustedOnly
+              ? null
+              : (value) => setState(() => _shell = value),
         ),
       ],
     ),
   ];
 
-  List<Widget> _video() => [
-    _heading('新建远程会话'),
-    const SizedBox(height: 12),
-    _choice('默认画质', _quality, const {
-      'auto': '自动',
-      'clear': '清晰',
-      'smooth': '流畅',
-    }, (value) => setState(() => _quality = value)),
-    const SizedBox(height: 12),
-    _choice('默认帧率上限', _fps.toString(), {
-      for (final fps in {10, 15, 24, 30, 45, 60, _fps}) '$fps': '$fps FPS',
-    }, (value) => setState(() => _fps = int.parse(value))),
-  ];
-
-  List<Widget> _storage() => [
-    _heading('文件接收'),
-    const SizedBox(height: 12),
-    _folder(_downloads, '本机接收文件的默认目录'),
-    const SizedBox(height: 8),
-    const Text('在文件管理中使用。留空时可在传输前选择目录。'),
-    if (widget.host.hasDeferredSettings)
-      TextButton(
-        onPressed: () {
-          widget.host.cancelDeferredSettings();
-          Navigator.pop(context);
-        },
-        child: const Text('取消待生效的设置'),
+  Widget _video() => SettingsSection(
+    title: '画面',
+    children: [
+      const SizedBox(height: 6),
+      _note('本机发起连接时的默认画质'),
+      const SizedBox(height: 12),
+      VideoQualityFields(
+        value: _quality,
+        onChanged: (value) => setState(() => _quality = value),
       ),
-  ];
+      const SizedBox(height: 12),
+      const Divider(height: 1),
+      const SizedBox(height: 12),
+      _choice(
+        '本机共享画面的编码格式',
+        _codec.name,
+        {for (final codec in DesktopVideoCodec.values) codec.name: codec.label},
+        (value) =>
+            setState(() => _codec = DesktopVideoCodec.values.byName(value)),
+      ),
+      const SizedBox(height: 6),
+      _note('新来访会话会与对方协商可用的格式。'),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        dense: true,
+        title: const Text('优先硬件编码'),
+        value: !_softwareEncoding,
+        onChanged: (value) => setState(() => _softwareEncoding = !value),
+      ),
+    ],
+  );
 
-  Widget _heading(String text) =>
-      Text(text, style: Theme.of(context).textTheme.titleSmall);
+  Widget _storage() => SettingsSection(
+    title: '本地存储',
+    children: [
+      const SizedBox(height: 4),
+      _folder(_downloads, '本机文件接收目录'),
+      const SizedBox(height: 8),
+      _note('在文件管理中使用。留空时可在传输前选择目录。'),
+    ],
+  );
+
+  Widget _note(String text) {
+    final theme = Theme.of(context);
+    return Text(
+      text,
+      style: theme.textTheme.bodySmall?.copyWith(
+        color: theme.colorScheme.onSurfaceVariant,
+      ),
+    );
+  }
 
   Widget _choice(
     String label,
@@ -510,15 +588,124 @@ class _SettingsDialogState extends State<SettingsDialog> {
       ),
     ),
   );
+}
 
-  Widget _numberField(
-    TextEditingController field,
-    String label, {
-    String? hint,
-    bool enabled = true,
-    ValueChanged<String>? onChanged,
-  }) => TextField(
-    controller: field,
+class _SelfHostedDialog extends StatefulWidget {
+  const _SelfHostedDialog({required this.origin});
+
+  final String origin;
+
+  @override
+  State<_SelfHostedDialog> createState() => _SelfHostedDialogState();
+}
+
+class _SelfHostedDialogState extends State<_SelfHostedDialog> {
+  late final _uri = Uri.tryParse(widget.origin);
+  late final _server = TextEditingController(text: _editableAddress(_uri));
+  late final _port = TextEditingController(
+    text: _uri?.hasPort == true ? _uri!.port.toString() : '',
+  );
+  String? _error;
+
+  static String _editableAddress(Uri? uri) {
+    if (uri == null || uri.host.isEmpty) return '';
+    final host = uri.host.contains(':') ? '[${uri.host}]' : uri.host;
+    return uri.scheme == 'http' ? 'http://$host' : host;
+  }
+
+  void _confirm() {
+    final origin = directoryOriginFromFields(_server.text, _port.text);
+    if (origin == null) {
+      setState(() => _error = '请输入有效的服务器地址和端口。');
+      return;
+    }
+    Navigator.pop(context, origin);
+  }
+
+  void _clearError(String _) {
+    if (_error != null) setState(() => _error = null);
+  }
+
+  @override
+  void dispose() {
+    _server.dispose();
+    _port.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('自托管 ID 服务'),
+    scrollable: true,
+    content: SizedBox(
+      width: 360,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            key: const ValueKey('directory-server'),
+            controller: _server,
+            autofocus: true,
+            autocorrect: false,
+            textInputAction: TextInputAction.next,
+            keyboardType: TextInputType.url,
+            decoration: const InputDecoration(
+              labelText: '服务器地址',
+              hintText: 'desk.example.test',
+            ),
+            onChanged: _clearError,
+          ),
+          const SizedBox(height: 14),
+          _PortField(
+            controller: _port,
+            label: '信令 HTTPS 端口',
+            hint: '443',
+            onChanged: _clearError,
+            onSubmitted: (_) => _confirm(),
+          ),
+          if (_error case final error?) ...[
+            const SizedBox(height: 8),
+            Semantics(
+              liveRegion: true,
+              child: Text(
+                error,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+          ],
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('取消'),
+      ),
+      FilledButton(onPressed: _confirm, child: const Text('确认')),
+    ],
+  );
+}
+
+class _PortField extends StatelessWidget {
+  const _PortField({
+    required this.controller,
+    required this.label,
+    this.hint,
+    this.enabled = true,
+    this.onChanged,
+    this.onSubmitted,
+  });
+
+  final TextEditingController controller;
+  final String label;
+  final String? hint;
+  final bool enabled;
+  final ValueChanged<String>? onChanged, onSubmitted;
+
+  @override
+  Widget build(BuildContext context) => TextField(
+    controller: controller,
     enabled: enabled,
     keyboardType: TextInputType.number,
     inputFormatters: [
@@ -526,6 +713,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       LengthLimitingTextInputFormatter(5),
     ],
     onChanged: onChanged,
+    onSubmitted: onSubmitted,
     decoration: InputDecoration(labelText: label, hintText: hint),
   );
 }

@@ -11,7 +11,8 @@ use axum::{
 };
 use nexdesk_directory::{IceConfiguration, RemoteIdentity};
 use nexdesk_media::{
-    CaptureKind, CaptureStatus, CaptureTarget, ControlPipe, HostPeer, capture_sources,
+    CaptureKind, CaptureStatus, CaptureTarget, ControlPipe, DesktopMediaSettings, HostPeer,
+    capture_sources,
 };
 use nexdesk_platform::{
     AudioCapture, DisplayMode, Input, InputError, InputLease, Monitor, NativeInput, Region,
@@ -143,23 +144,25 @@ pub(crate) async fn finish_session(
             capabilities: requested, remote: remote.cloned(), controller,
         }, offer.resume.as_deref()) => result?,
     };
-    let audio = access.capabilities.includes(Capabilities::AUDIO);
+    let media_settings = DesktopMediaSettings {
+        capture: target,
+        extended,
+        audio: access.capabilities.includes(Capabilities::AUDIO),
+        encoding: desktop.encoding(),
+    };
     let shell = access.capabilities.includes(Capabilities::SHELL);
     let negotiate = async {
         if let Some(session) = &directory {
             host.media
                 .answer_routed(
                     &offer.sdp,
-                    target,
-                    audio,
+                    media_settings,
                     ice_options(session.ice.clone()),
                     shell,
                 )
                 .await
         } else {
-            host.media
-                .answer_desktop(&offer.sdp, target, extended, audio)
-                .await
+            host.media.answer_desktop(&offer.sdp, media_settings).await
         }
     };
     let (peer, sdp, pipes) = tokio::select! {

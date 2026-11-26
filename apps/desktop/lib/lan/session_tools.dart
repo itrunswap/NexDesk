@@ -3,8 +3,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../connection/video_quality.dart';
+import '../connection/video_quality_fields.dart';
 import 'file_panel.dart';
 import 'native_collaboration.dart';
+import 'remote_surface.dart';
 
 class SessionTools extends StatefulWidget {
   const SessionTools({
@@ -16,8 +19,11 @@ class SessionTools extends StatefulWidget {
     required this.frameWidth,
     required this.frameHeight,
     required this.canInput,
+    required this.hasControlGrant,
     required this.release,
     required this.onModePreview,
+    required this.scale,
+    this.defaultQuality = const VideoQuality(),
     this.downloadRoot = '',
   });
 
@@ -26,7 +32,10 @@ class SessionTools extends StatefulWidget {
   final String display;
   final int generation, frameWidth, frameHeight;
   final bool canInput;
+  final bool hasControlGrant;
   final VoidCallback release, onModePreview;
+  final VideoQuality defaultQuality;
+  final SurfaceScale scale;
   final String downloadRoot;
 
   @override
@@ -41,8 +50,6 @@ class _SessionToolsState extends State<SessionTools> {
   String? _checked;
   bool _modeBusy = false;
   bool _remember = false;
-  String _preset = 'auto';
-  int _fps = 30;
   int _previousVolume = 60;
 
   int? get _grant => _map(_state['session'])['capabilities'] as int?;
@@ -76,9 +83,6 @@ class _SessionToolsState extends State<SessionTools> {
   void _refresh() {
     setState(() {
       _state = widget.native.inspect(widget.viewer);
-      final quality = _map(_map(_state['session'])['quality']);
-      _preset = quality['preset'] as String? ?? _preset;
-      _fps = quality['fps'] as int? ?? _fps;
       if (_expires case final expiry? when DateTime.now().isAfter(expiry)) {
         _preview = null;
         _expires = null;
@@ -136,41 +140,24 @@ class _SessionToolsState extends State<SessionTools> {
 
   Future<void> _quality() => _run(() async {
     widget.release();
-    var preset = _preset;
-    var fps = _fps;
-    final selected = await showDialog<bool>(
+    final active = _map(
+      _map(widget.native.inspect(widget.viewer)['session'])['quality'],
+    );
+    var draft = active.isEmpty
+        ? widget.defaultQuality
+        : VideoQuality.fromJson(active);
+    final selected = await showDialog<VideoQuality>(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, update) => AlertDialog(
           title: const Text('画质与帧率'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              DropdownButtonFormField<String>(
-                initialValue: preset,
-                decoration: const InputDecoration(labelText: '画质模式'),
-                items: const [
-                  DropdownMenuItem(value: 'auto', child: Text('自动')),
-                  DropdownMenuItem(value: 'clear', child: Text('清晰')),
-                  DropdownMenuItem(value: 'smooth', child: Text('流畅')),
-                ],
-                onChanged: (value) => update(() => preset = value ?? 'auto'),
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<int>(
-                initialValue: fps,
-                decoration: const InputDecoration(labelText: '帧率上限'),
-                items: [15, 24, 30, 45, 60]
-                    .map(
-                      (value) => DropdownMenuItem(
-                        value: value,
-                        child: Text('$value FPS'),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (value) => update(() => fps = value ?? 30),
-              ),
-            ],
+          scrollable: true,
+          content: SizedBox(
+            width: 350,
+            child: VideoQualityFields(
+              value: draft,
+              onChanged: (value) => update(() => draft = value),
+            ),
           ),
           actions: [
             TextButton(
@@ -178,26 +165,20 @@ class _SessionToolsState extends State<SessionTools> {
               child: const Text('取消'),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(context, true),
+              onPressed: () => Navigator.pop(context, draft),
               child: const Text('应用'),
             ),
           ],
         ),
       ),
     );
-    if (!mounted || selected != true) return;
-    await widget.native.remote(
-      widget.viewer,
-      'quality',
-      fields: {
-        'quality': {'preset': preset, 'fps': fps},
-      },
-    );
+    if (!mounted || selected == null) return;
+    final applied = await widget.native.setQuality(widget.viewer, selected);
     if (!mounted) return;
-    setState(() {
-      _preset = preset;
-      _fps = fps;
-    });
+    _refresh();
+    if (!applied.matches(selected)) {
+      _message('被控端只应用了部分画质设置。');
+    }
   });
 
   Future<void> _chooseMode() => _run(() async {
@@ -420,7 +401,7 @@ class _SessionToolsState extends State<SessionTools> {
               ),
             if (_can(CollaborationCapability.text) && widget.canInput)
               TextButton(onPressed: _text, child: const Text('输入文本')),
-            if (!widget.canInput)
+            if (!widget.hasControlGrant)
               TextButton(
                 onPressed: () => _run(() async {
                   await widget.native.request(widget.viewer, {
@@ -445,6 +426,7 @@ class _SessionToolsState extends State<SessionTools> {
                   builder: (_) => _Diagnostics(
                     native: widget.native,
                     viewer: widget.viewer,
+                    scale: widget.scale,
                   ),
                 );
               },
@@ -533,9 +515,14 @@ class _CommittedTextState extends State<_CommittedText> {
 }
 
 class _Diagnostics extends StatefulWidget {
-  const _Diagnostics({required this.native, required this.viewer});
+  const _Diagnostics({
+    required this.native,
+    required this.viewer,
+    required this.scale,
+  });
   final NativeCollaboration native;
   final int viewer;
+  final SurfaceScale scale;
 
   @override
   State<_Diagnostics> createState() => _DiagnosticsState();
@@ -544,7 +531,7 @@ class _Diagnostics extends StatefulWidget {
 class _DiagnosticsState extends State<_Diagnostics> {
   Timer? _clock;
   bool _loading = false;
-  Map<String, Object?> _sent = const {}, _info = const {};
+  Map<String, Object?> _sent = const {}, _local = const {};
 
   @override
   void initState() {
@@ -561,14 +548,14 @@ class _DiagnosticsState extends State<_Diagnostics> {
       if (mounted) {
         setState(() {
           _sent = _map(reply['ok']);
-          _info = _map(widget.native.inspect(widget.viewer)['session']);
+          _local = widget.native.inspect(widget.viewer);
         });
       }
     } on CollaborationIssue {
       if (mounted) {
         setState(() {
           _sent = const {};
-          _info = const {};
+          _local = widget.native.inspect(widget.viewer);
         });
       }
     } finally {
@@ -584,30 +571,92 @@ class _DiagnosticsState extends State<_Diagnostics> {
 
   @override
   Widget build(BuildContext context) {
-    final received = _map(_info['media']);
+    final info = _map(_local['session']);
+    final received = _map(info['media']);
     final sender = _map(_sent['media']);
     final ice = _map(received['ice']);
     final audio = _map(_sent['audio']);
-    final sound = _map(_info['sound']);
+    final sound = _map(info['sound']);
+    final quality = _map(info['quality']);
+    final configured = VideoQuality.fromJson(quality);
+    final decoded = _map(_local['decoded_frame']);
+    final frame = Size(
+      (decoded['width'] as num?)?.toDouble() ?? 0,
+      (decoded['height'] as num?)?.toDouble() ?? 0,
+    );
+    final window = MediaQuery.sizeOf(context);
+    final ratio = MediaQuery.devicePixelRatioOf(context);
+    final padding = View.of(context).padding;
+    final viewport = Size(
+      window.width - (padding.left + padding.right) / ratio,
+      window.height - (padding.top + padding.bottom) / ratio,
+    );
+    final drawn = frame.isEmpty || viewport.isEmpty
+        ? Size.zero
+        : remoteFrameLayout(viewport, frame, widget.scale, ratio) * ratio;
+    final bitrate = sender['target_bitrate_bps'];
+    final reason = switch (sender['limitation']) {
+      'bandwidth' => '网络带宽',
+      'cpu' => '编码负载',
+      'other' => '媒体引擎限制',
+      'none' => '未触发',
+      _ => '等待统计',
+    };
+    final preferred = sender['requested_codec'] as String?;
+    final negotiated = sender['negotiated_codec'] as String?;
     return AlertDialog(
       title: const Text('连接与媒体统计'),
+      scrollable: true,
       content: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
+          Text('远端采集  ${_size(sender['source_size'])}'),
+          Text('送入编码  ${_size(sender['capture_size'])}'),
+          Text('实际发送  ${_size(sender['frame_size'])}'),
+          Text('本机解码  ${_size(decoded)}'),
+          if (!drawn.isEmpty)
+            Text('本地绘制  ${drawn.width.round()} × ${drawn.height.round()}'),
+          if (quality.isNotEmpty) ...[
+            Text(
+              '传输上限  ${configured.resolution.label} · ${configured.fps} FPS',
+            ),
+            if (configured.maxMbps case final int maxMbps)
+              Text('码率上限  $maxMbps Mbps'),
+          ],
+          if (sender['capture_work_ms'] case final num work)
+            Text('最近一帧采集与转换  ${_number(work)} ms'),
+          Text('编码限制  $reason'),
+          const SizedBox(height: 12),
           Text(
             '网络  ${ice.isEmpty
                 ? '等待统计'
                 : ice['relayed'] == true
-                ? '中继'
-                : '局域网直连'}',
+                ? 'TURN 中继'
+                : '点对点直连'}',
           ),
+          const Text('会话加密  DTLS / SRTP'),
+          if (ice['protocol'] case final String protocol)
+            Text('传输协议  ${protocol.toUpperCase()}'),
           Text('网络 RTT  ${_number(ice['rtt_ms'])} ms'),
           Text(
-            '接收  ${_number(_info['frames_per_second'])} FPS · ${_number(_info['kilobits_per_second'])} kbit/s',
+            '接收  ${_number(info['frames_per_second'])} FPS · ${_number(info['kilobits_per_second'])} kbit/s',
           ),
+          if (bitrate is num) Text('发送目标  ${_number(bitrate / 1000000)} Mbps'),
+          const SizedBox(height: 12),
+          if (negotiated != null)
+            Text(
+              preferred == null || negotiated == preferred
+                  ? '视频格式  ${negotiated.toUpperCase()}'
+                  : '视频格式  ${negotiated.toUpperCase()} · 对端偏好 ${preferred.toUpperCase()}',
+            )
+          else if (received['video_codec'] case final String codec)
+            Text('视频格式  ${codec.split('/').last.toUpperCase()}'),
           Text('编码  ${sender['codec_implementation'] ?? '—'}'),
           Text('解码  ${received['codec_implementation'] ?? '—'}'),
+          Text(
+            '平均编解码耗时  ${_number(sender['average_codec_ms'])} / ${_number(received['average_codec_ms'])} ms',
+          ),
           Text(
             '丢帧  ${received['dropped_frames'] ?? '—'} · 丢包  ${received['lost_packets'] ?? '—'}',
           ),
@@ -625,6 +674,15 @@ class _DiagnosticsState extends State<_Diagnostics> {
       ],
     );
   }
+}
+
+String _size(Object? value) {
+  final size = _map(value);
+  final width = size['width'];
+  final height = size['height'];
+  return width is num && height is num && width > 0 && height > 0
+      ? '$width × $height'
+      : '—';
 }
 
 Map<String, Object?> _map(Object? value) =>

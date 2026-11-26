@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering::Relaxed},
     },
     thread,
     time::{Duration, Instant},
@@ -16,7 +16,7 @@ use serde::Serialize;
 #[cfg(target_os = "windows")]
 use crate::windows_h264::HardwareSink;
 use crate::{
-    MediaError,
+    FrameSize, MediaError, Quality, ResolutionLimit,
     desktop_capture::{CaptureError, DesktopCapture, SourceType},
 };
 
@@ -24,6 +24,38 @@ pub(crate) const PROBE_WIDTH: u32 = 960;
 pub(crate) const PROBE_HEIGHT: u32 = 540;
 pub(crate) const MAX_WIDTH: u32 = 4096;
 pub(crate) const MAX_HEIGHT: u32 = 4096;
+
+pub(crate) struct CaptureSettings {
+    pub(crate) fps: AtomicU16,
+    resolution: AtomicU8,
+}
+
+impl CaptureSettings {
+    pub(crate) fn new(fps: u16) -> Self {
+        Self {
+            fps: AtomicU16::new(fps),
+            resolution: AtomicU8::new(0),
+        }
+    }
+
+    pub(crate) fn set(&self, quality: Quality) {
+        self.resolution
+            .store(quality.resolution.map_or(0, |limit| limit as u8), Relaxed);
+        self.fps.store(quality.fps, Relaxed);
+    }
+
+    pub(crate) fn output_size(&self, source: FrameSize) -> FrameSize {
+        let limit = ResolutionLimit::from_value(self.resolution.load(Relaxed));
+        match limit {
+            Some(limit) => source.fit(limit.size()),
+            None if valid_size(source.width, source.height) => source,
+            None => source.fit(FrameSize {
+                width: 4096,
+                height: 2304,
+            }),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaptureKind {
@@ -77,7 +109,13 @@ struct Counters {
     skipped: AtomicU64,
     last_frame_work_us: AtomicU64,
     failed: AtomicBool,
-    region: Mutex<Option<CaptureRegion>>,
+    frame: Mutex<Option<CaptureFrame>>,
+}
+
+#[derive(Clone, Copy)]
+struct CaptureFrame {
+    region: Option<CaptureRegion>,
+    size: FrameSize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -96,6 +134,7 @@ pub struct CaptureStatus {
     pub unavailable: bool,
     pub hardware_encoded: u64,
     pub region: Option<CaptureRegion>,
+    pub frame_size: Option<FrameSize>,
 }
 
 #[derive(Clone)]
@@ -129,7 +168,7 @@ impl CaptureTask {
     pub(crate) fn spawn(
         target: CaptureTarget,
         source: FrameSink,
-        fps: Arc<AtomicU16>,
+        settings: Arc<CaptureSettings>,
     ) -> Result<Self, MediaError> {
         let stop = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(Counters::default());
@@ -145,15 +184,24 @@ impl CaptureTask {
             .spawn(move || match target {
                 CaptureTarget::Pattern => {
                     let mut sequence = 0;
-                    run_capture_loop(&stop_on_worker, &fps, || {
+                    run_capture_loop(&stop_on_worker, &settings.fps, || {
                         let started = Instant::now();
-                        let frame = pattern(sequence);
+                        let size = settings.output_size(FrameSize {
+                            width: PROBE_WIDTH,
+                            height: PROBE_HEIGHT,
+                        });
+                        let frame = pattern(sequence, size);
                         sequence = sequence.wrapping_add(1);
                         let accepted = source.submit(&frame);
-                        record_frame(&shared, accepted, started);
+                        record_frame(
+                            &shared,
+                            accepted,
+                            started,
+                            CaptureFrame { region: None, size },
+                        );
                     });
                 }
-                target => capture_desktop(target, source, &stop_on_worker, &fps, &shared),
+                target => capture_desktop(target, source, &stop_on_worker, &settings, &shared),
             })
             .map_err(MediaError::CaptureWorker)?;
         Ok(Self {
@@ -170,13 +218,15 @@ impl CaptureTask {
             self.hardware.as_ref().map_or((0, false), |s| s.read());
         #[cfg(not(target_os = "windows"))]
         let (hardware_encoded, encoder_failed) = (0, false);
+        let frame = self.counters.frame.lock().ok().and_then(|frame| *frame);
         CaptureStatus {
             submitted: self.counters.submitted.load(Relaxed),
             skipped: self.counters.skipped.load(Relaxed),
             last_frame_work_us: self.counters.last_frame_work_us.load(Relaxed),
             unavailable: self.counters.failed.load(Relaxed) || encoder_failed,
             hardware_encoded,
-            region: self.counters.region.lock().ok().and_then(|region| *region),
+            region: frame.and_then(|frame| frame.region),
+            frame_size: frame.map(|frame| frame.size),
         }
     }
 }
@@ -200,7 +250,7 @@ fn capture_desktop(
     target: CaptureTarget,
     source: FrameSink,
     stopped: &Arc<AtomicBool>,
-    fps: &AtomicU16,
+    settings: &Arc<CaptureSettings>,
     counters: &Arc<Counters>,
 ) {
     let (source_type, selected_id) = match target {
@@ -215,18 +265,27 @@ fn capture_desktop(
     };
     let shared = counters.clone();
     let stop = stopped.clone();
-    let capture = capturer.start(selected_id, move |result| {
+    let capture = capturer.start(selected_id, settings.clone(), move |result| {
         if stop.load(Relaxed) {
             return;
         }
         let started = Instant::now();
         match result {
             Ok((frame, region)) => {
+                let size = FrameSize {
+                    width: frame.buffer.width(),
+                    height: frame.buffer.height(),
+                };
                 let accepted = source.submit(&frame);
-                if accepted && let Ok(mut current) = shared.region.lock() {
-                    *current = Some(region);
-                }
-                record_frame(&shared, accepted, started);
+                record_frame(
+                    &shared,
+                    accepted,
+                    started,
+                    CaptureFrame {
+                        region: Some(region),
+                        size,
+                    },
+                );
             }
             Err(CaptureError::Temporary) => {
                 shared.skipped.fetch_add(1, Relaxed);
@@ -238,14 +297,17 @@ fn capture_desktop(
         }
     });
     if capture.is_ok() {
-        run_capture_loop(stopped, fps, || capturer.capture_frame());
+        run_capture_loop(stopped, &settings.fps, || capturer.capture_frame());
     } else {
         counters.failed.store(true, Relaxed);
     }
 }
 
-fn record_frame(counters: &Counters, accepted: bool, started: Instant) {
+fn record_frame(counters: &Counters, accepted: bool, started: Instant, frame: CaptureFrame) {
     if accepted {
+        if let Ok(mut last) = counters.frame.lock() {
+            *last = Some(frame);
+        }
         counters.submitted.fetch_add(1, Relaxed);
         counters.last_frame_work_us.store(
             started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
@@ -262,16 +324,16 @@ pub(crate) fn valid_size(width: u32, height: u32) -> bool {
         && width * height <= 4096 * 2304
 }
 
-fn pattern(sequence: u32) -> VideoFrame<I420Buffer> {
-    let mut image = I420Buffer::new(PROBE_WIDTH, PROBE_HEIGHT);
+fn pattern(sequence: u32, size: FrameSize) -> VideoFrame<I420Buffer> {
+    let mut image = I420Buffer::new(size.width, size.height);
     let (y, u, v) = image.data_mut();
-    let width = PROBE_WIDTH as usize;
+    let width = size.width as usize;
     for (row, line) in y.chunks_exact_mut(width).enumerate() {
         for (column, pixel) in line.iter_mut().enumerate() {
             let band = column * 6 / width;
             *pixel = 44 + band as u8 * 22;
             if row / 36 == 8
-                && ((column as u32).wrapping_sub(sequence.wrapping_mul(12)) % PROBE_WIDTH) < 96
+                && ((column as u32).wrapping_sub(sequence.wrapping_mul(12)) % size.width) < 96
             {
                 *pixel = 240;
             }

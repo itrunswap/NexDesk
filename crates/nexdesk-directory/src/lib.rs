@@ -381,6 +381,7 @@ async fn read_json<R: DeserializeOwned>(
         404 => return Err(DirectoryError::Offline),
         410 => return Err(DirectoryError::Expired),
         409 | 429 | 503 => return Err(DirectoryError::Busy),
+        502 | 504 => return Err(DirectoryError::Unreachable),
         _ => return Err(DirectoryError::InvalidResponse),
     }
     let mut bytes = Vec::new();

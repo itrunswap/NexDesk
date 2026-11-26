@@ -248,7 +248,7 @@ impl Live {
                 if let Some((preset, fps)) =
                     preset.zip(fps).filter(|(_, fps)| (10..=60).contains(fps))
                 {
-                    self.quality(Quality { preset, fps }).await
+                    self.quality(Quality::new(preset, fps)).await
                 } else {
                     "Use quality auto, clear or smooth and a frame rate from 10 to 60.".into()
                 }

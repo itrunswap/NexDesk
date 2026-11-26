@@ -7,7 +7,7 @@ use std::{
 
 use nexdesk_directory::ServerOrigin;
 use nexdesk_files::Root;
-use nexdesk_store::{DesktopPreferences, Store};
+use nexdesk_store::{ApprovalPolicy, DesktopPreferences, Store};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::{net::TcpListener, sync::watch};
@@ -161,6 +161,7 @@ impl ManagedReceivers {
         desktop.configure_shared(target, share);
         desktop.configure_permissions(settings.permissions);
         desktop.configure_approval(settings.approval_policy);
+        desktop.configure_encoding(settings.video.encoding);
         if replace_lan && (listener.is_some() || address.is_none()) {
             self.lan = None;
             host.clear_challenges(false);
@@ -180,7 +181,10 @@ impl ManagedReceivers {
             }
         }
 
-        let allow_shell = settings.allow_shell && origin.is_some() && crate::shell::ordinary_user();
+        let allow_shell = settings.allow_shell
+            && settings.approval_policy != ApprovalPolicy::TrustedOnly
+            && origin.is_some()
+            && crate::shell::ordinary_user();
         let directory_changed = self.directory.as_ref().map(|link| &link.value.origin)
             != origin.as_ref()
             || self

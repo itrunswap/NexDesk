@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::Path};
 
 use nexdesk_core::{DEFAULT_LAN_PORT, LanEndpoint, local_listener_ip};
 use nexdesk_directory::ServerOrigin;
-use nexdesk_session::collaboration::Capabilities;
+use nexdesk_session::collaboration::{Capabilities, Codec, EncodingPreference, ResolutionLimit};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,7 @@ pub enum ApprovalPolicy {
     Manual = 0,
     TrustedDevices = 1,
     Password = 2,
+    TrustedOnly = 3,
 }
 
 fn read_approval_policy<'de, D: serde::Deserializer<'de>>(
@@ -65,6 +66,7 @@ pub struct DesktopPreferences {
     pub use_self_hosted: bool,
     pub directory: String,
     pub lan_allowed: bool,
+    pub force_relay: bool,
     pub address: String,
     pub port: u16,
     pub source: String,
@@ -75,7 +77,16 @@ pub struct DesktopPreferences {
     pub download_root: String,
     pub quality: String,
     pub fps: u16,
+    pub video: DesktopVideoPreferences,
     pub permissions: DesktopPermissions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DesktopVideoPreferences {
+    pub resolution: Option<ResolutionLimit>,
+    pub max_mbps: Option<u16>,
+    pub encoding: EncodingPreference,
 }
 
 impl Default for DesktopPreferences {
@@ -84,6 +95,7 @@ impl Default for DesktopPreferences {
             use_self_hosted: false,
             directory: String::new(),
             lan_allowed: true,
+            force_relay: false,
             address: String::new(),
             port: DEFAULT_LAN_PORT,
             source: String::new(),
@@ -93,6 +105,7 @@ impl Default for DesktopPreferences {
             download_root: String::new(),
             quality: "auto".into(),
             fps: 30,
+            video: DesktopVideoPreferences::default(),
             permissions: DesktopPermissions::default(),
         }
     }
@@ -123,6 +136,10 @@ impl DesktopPreferences {
             || !valid_path(&self.download_root)
             || !matches!(self.quality.as_str(), "auto" | "clear" | "smooth")
             || !(10..=60).contains(&self.fps)
+            || self
+                .video
+                .max_mbps
+                .is_some_and(|rate| !(1..=80).contains(&rate))
             || !Capabilities::ALL.without(Capabilities::SHELL).includes(
                 self.permissions
                     .request_capabilities
@@ -187,6 +204,8 @@ impl Store {
                         quality: row.get(9)?,
                         fps: row.get(10)?,
                         approval_policy: ApprovalPolicy::Manual,
+                        force_relay: false,
+                        video: DesktopVideoPreferences::default(),
                         permissions: DesktopPermissions::default(),
                     })
                 },
@@ -195,6 +214,16 @@ impl Store {
         if let Some(mut settings) = settings {
             settings.approval_policy = self.approval_policy()?;
             settings.permissions = self.desktop_permissions()?;
+            settings.video = self.desktop_video_preferences()?;
+            settings.force_relay = self
+                .db
+                .query_row(
+                    "SELECT force_relay FROM desktop_transport WHERE id=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or_default();
             return settings.validated();
         }
 
@@ -234,6 +263,7 @@ impl Store {
             0 => Ok(ApprovalPolicy::Manual),
             1 => Ok(ApprovalPolicy::TrustedDevices),
             2 => Ok(ApprovalPolicy::Password),
+            3 => Ok(ApprovalPolicy::TrustedOnly),
             _ => Err(StoreError::Invalid),
         }
     }
@@ -301,6 +331,23 @@ impl Store {
              ON CONFLICT(id) DO UPDATE SET unattended=excluded.unattended",
             [settings.approval_policy as u8],
         )?;
+        transaction.execute(
+            "INSERT INTO desktop_transport (id,force_relay) VALUES (1,?1)
+             ON CONFLICT(id) DO UPDATE SET force_relay=excluded.force_relay",
+            [settings.force_relay],
+        )?;
+        transaction.execute(
+            "INSERT INTO desktop_video (id,resolution,max_mbps,codec,software)
+             VALUES (1,?1,?2,?3,?4)
+             ON CONFLICT(id) DO UPDATE SET resolution=excluded.resolution,
+                max_mbps=excluded.max_mbps,codec=excluded.codec,software=excluded.software",
+            params![
+                settings.video.resolution.map(|value| value as u8),
+                settings.video.max_mbps,
+                settings.video.encoding.codec.map(|value| value as u8),
+                settings.video.encoding.software,
+            ],
+        )?;
         let permissions = settings.permissions;
         transaction.execute(
             "INSERT INTO desktop_permissions VALUES (1,?1,?2,?3,?4,?5)
@@ -318,6 +365,39 @@ impl Store {
         )?;
         transaction.commit()?;
         Ok(settings)
+    }
+
+    fn desktop_video_preferences(&self) -> Result<DesktopVideoPreferences, StoreError> {
+        let row = self
+            .db
+            .query_row(
+                "SELECT resolution,max_mbps,codec,software FROM desktop_video WHERE id=1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<u8>>(0)?,
+                        row.get(1)?,
+                        row.get::<_, Option<u8>>(2)?,
+                        row.get(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((resolution, max_mbps, codec, software)) = row else {
+            return Ok(DesktopVideoPreferences::default());
+        };
+        Ok(DesktopVideoPreferences {
+            resolution: resolution
+                .map(|value| ResolutionLimit::from_value(value).ok_or(StoreError::Invalid))
+                .transpose()?,
+            max_mbps,
+            encoding: EncodingPreference {
+                codec: codec
+                    .map(|value| Codec::from_value(value).ok_or(StoreError::Invalid))
+                    .transpose()?,
+                software,
+            },
+        })
     }
 }
 
@@ -375,6 +455,15 @@ mod tests {
         assert_eq!(migrated.port, 55000);
         assert_eq!(migrated.source, "screen:4");
         migrated.use_self_hosted = false;
+        migrated.force_relay = true;
+        migrated.video = DesktopVideoPreferences {
+            resolution: Some(ResolutionLimit::Qhd),
+            max_mbps: Some(16),
+            encoding: EncodingPreference {
+                codec: Some(Codec::Av1),
+                software: true,
+            },
+        };
         migrated.permissions.device_authorization = true;
         migrated.permissions.allow_control = false;
         migrated.permissions.allowed_capabilities = Capabilities::AUDIO;
@@ -387,6 +476,39 @@ mod tests {
             Some("https://default.example.test".into())
         );
         assert!(migrated.active_origin("")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn trusted_only_uses_existing_unexpired_grants_without_enrolling() -> Result<(), StoreError> {
+        use nexdesk_session::controller::ControllerIdentity;
+
+        let store = Store::open_at(Path::new(":memory:"))?;
+        let mut settings = DesktopPreferences {
+            approval_policy: ApprovalPolicy::TrustedDevices,
+            ..DesktopPreferences::default()
+        };
+        store.save_desktop_preferences(settings.clone())?;
+        let identity = ControllerIdentity::parse(&"A".repeat(43))?;
+        let scope = "https://directory.example.test";
+        store.trust_controller(scope, &identity, true, Capabilities::CLIPBOARD)?;
+        settings.approval_policy = ApprovalPolicy::TrustedOnly;
+        store.save_desktop_preferences(settings.clone())?;
+        assert_eq!(store.desktop_preferences()?, settings);
+        assert_eq!(
+            store.controller_grant(scope, &identity)?,
+            Some((true, Capabilities::CLIPBOARD)),
+        );
+        assert!(store.controller_grant("lan", &identity)?.is_none());
+        assert!(
+            store
+                .trust_controller("lan", &identity, true, Capabilities::default())
+                .is_err()
+        );
+        store
+            .db
+            .execute("UPDATE trusted_controller SET expires_at=unixepoch()", [])?;
+        assert!(store.controller_grant(scope, &identity)?.is_none());
         Ok(())
     }
 

@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../lan/host_controller.dart';
+import 'desktop_version.dart';
+import 'settings_section.dart';
 
 class DesktopMaintenance extends StatefulWidget {
   const DesktopMaintenance({super.key, required this.host});
@@ -64,13 +66,11 @@ class _DesktopMaintenanceState extends State<DesktopMaintenance> {
       final events = await widget.host.native.local({
         'operation': 'session_history',
       });
+      final version = await loadDesktopVersion();
       if (!mounted) return;
       final report = const JsonEncoder.withIndent('  ').convert({
         'app': 'NexDesk',
-        'release': const String.fromEnvironment(
-          'NEXDESK_RELEASE_VERSION',
-          defaultValue: '0.1.0',
-        ),
+        'release': ?version,
         'platform': Platform.operatingSystem,
         'directory_protocol': 1,
         'local_receiver': widget.host.endpoint == null
@@ -141,41 +141,69 @@ class _DesktopMaintenanceState extends State<DesktopMaintenance> {
 
   @override
   Widget build(BuildContext context) => ListView(
-    padding: const EdgeInsets.all(20),
+    key: const PageStorageKey('maintenance'),
+    padding: const EdgeInsets.fromLTRB(18, 16, 18, 0),
     children: [
-      const Text('启动与后台'),
-      SwitchListTile(
-        contentPadding: EdgeInsets.zero,
-        title: const Text('登录系统后启动 NexDesk'),
-        value: _status['startupEnabled'] == true,
-        onChanged: _status['startupSupported'] == true && !_working
-            ? (enabled) => _change('setStartup', enabled)
-            : null,
+      SettingsSection(
+        title: '启动与后台',
+        children: [
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: const Text('登录系统后启动 NexDesk'),
+            value: _status['startupEnabled'] == true,
+            onChanged: _status['startupSupported'] == true && !_working
+                ? (enabled) => _change('setStartup', enabled)
+                : null,
+          ),
+          const Divider(height: 1),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: const Text('关闭窗口后保留在系统托盘'),
+            subtitle: const Text('可在托盘重新打开窗口或退出应用。'),
+            value: _status['trayEnabled'] == true,
+            onChanged: _status['traySupported'] == true && !_working
+                ? (enabled) => _change('setTray', enabled)
+                : null,
+          ),
+          const SizedBox(height: 6),
+          Text('启动与托盘设置修改后立即生效。', style: Theme.of(context).textTheme.bodySmall),
+        ],
       ),
-      SwitchListTile(
-        contentPadding: EdgeInsets.zero,
-        title: const Text('关闭窗口后保留在系统托盘'),
-        subtitle: const Text('可在托盘重新打开窗口或退出应用。'),
-        value: _status['trayEnabled'] == true,
-        onChanged: _status['traySupported'] == true && !_working
-            ? (enabled) => _change('setTray', enabled)
-            : null,
+      SettingsSection(
+        title: '诊断',
+        children: [
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.monitor_heart_outlined),
+            title: const Text('查看和复制诊断'),
+            onTap: _working ? null : _diagnostics,
+          ),
+          const Divider(height: 1),
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.delete_outline),
+            title: const Text('清除本机会话记录'),
+            onTap: _working ? null : _clearHistory,
+          ),
+          if (_error case final error?)
+            Semantics(liveRegion: true, child: Text(error)),
+        ],
       ),
-      const SizedBox(height: 12),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.monitor_heart_outlined),
-        title: const Text('查看和复制诊断'),
-        onTap: _working ? null : _diagnostics,
-      ),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.delete_outline),
-        title: const Text('清除本机会话记录'),
-        onTap: _working ? null : _clearHistory,
-      ),
-      if (_error case final error?)
-        Semantics(liveRegion: true, child: Text(error)),
+      if (widget.host.hasDeferredSettings)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: () {
+              widget.host.cancelDeferredSettings();
+              Navigator.pop(context);
+            },
+            child: const Text('取消待生效的设置'),
+          ),
+        ),
     ],
   );
 }
@@ -200,7 +228,7 @@ class _TrustedDevicesDialogState extends State<TrustedDevicesDialog> {
       context: context,
       builder: (dialog) => AlertDialog(
         title: const Text('撤销设备授权？'),
-        content: const Text('该设备下次连接需重新批准，此模式中的接收会话将结束。'),
+        content: const Text('设备的免确认授权将失效，此连接模式中的接收会话将结束。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialog),
@@ -276,6 +304,7 @@ class _TrustedDevicesDialogState extends State<TrustedDevicesDialog> {
       (device['expires_at'] as int) * 1000,
     );
     final date = '${expires.year}-${expires.month}-${expires.day}';
-    return '$scope · $grant · $date 到期';
+    final expiry = expires.isAfter(DateTime.now()) ? '$date 到期' : '已于 $date 到期';
+    return '$scope · $grant · $expiry';
   }
 }

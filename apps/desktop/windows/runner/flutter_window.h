@@ -6,6 +6,8 @@
 #include <flutter/flutter_view_controller.h>
 #include <flutter/method_channel.h>
 
+#include <cstdint>
+#include <map>
 #include <memory>
 
 #include "win32_window.h"
@@ -15,7 +17,8 @@
 class FlutterWindow : public Win32Window {
  public:
   // Creates a new FlutterWindow hosting a Flutter view running |project|.
-  explicit FlutterWindow(const flutter::DartProject& project);
+  explicit FlutterWindow(const flutter::DartProject& project,
+                         FlutterWindow* home = nullptr, int64_t session_id = 0);
   virtual ~FlutterWindow();
 
  protected:
@@ -29,6 +32,9 @@ class FlutterWindow : public Win32Window {
   bool ConfigureTray(bool enabled);
   void ShowTrayMenu(HWND window);
   void RegisterBackgroundChannel();
+  void RegisterSessionChannel();
+  bool OpenSession(const flutter::EncodableValue* arguments);
+  bool FocusSession(int64_t id, bool request_close = false);
   // The project to run.
   flutter::DartProject project_;
 
@@ -37,6 +43,11 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<PreviewTexture> preview_texture_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       background_channel_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      session_channel_;
+  FlutterWindow* const home_;
+  const int64_t session_id_;
+  std::map<int64_t, std::unique_ptr<FlutterWindow>> sessions_;
   bool tray_enabled_ = false;
   UINT taskbar_created_ = 0;
 };
