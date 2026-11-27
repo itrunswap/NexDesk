@@ -50,6 +50,8 @@ use crate::{
 pub const DESCRIPTION_LIMIT: usize = 48 * 1024;
 const ICE_DEADLINE: Duration = Duration::from_secs(5);
 const MAX_CANDIDATES: usize = 64;
+// This media stream carries NexDesk's SDR desktop, converted with libyuv's BT.601 matrix.
+const DESKTOP_STREAM_ID: &str = "desktop";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -329,9 +331,10 @@ impl HostMedia {
         } else {
             self.feed().await?
         };
-        let sender = peer
-            .connection
-            .add_track(MediaStreamTrack::Video(feed.video.clone()), &["desktop"])?;
+        let sender = peer.connection.add_track(
+            MediaStreamTrack::Video(feed.video.clone()),
+            &[DESKTOP_STREAM_ID],
+        )?;
         if let Some(encoding) = encoding {
             sender.set_video_encoder_backend(if encoding.software {
                 VideoEncoderBackend::Software
@@ -354,7 +357,7 @@ impl HostMedia {
         }
         if let Some(track) = &feed.audio {
             peer.connection
-                .add_track(MediaStreamTrack::Audio(track.clone()), &["desktop"])?;
+                .add_track(MediaStreamTrack::Audio(track.clone()), &[DESKTOP_STREAM_ID])?;
         }
         let description = peer
             .connection
@@ -672,7 +675,7 @@ impl Drop for Peer {
 
 pub struct ControllerOffer {
     peer: Peer,
-    video: mpsc::Receiver<RtcVideoTrack>,
+    video: mpsc::Receiver<(RtcVideoTrack, bool)>,
     audio: Option<mpsc::Receiver<RtcAudioTrack>>,
     sdp: String,
     pipes: Option<DesktopPipes>,
@@ -712,7 +715,11 @@ impl ControllerOffer {
         peer.connection
             .on_track(Some(Box::new(move |event| match event.track {
                 MediaStreamTrack::Video(track) => {
-                    let _ = track_sender.try_send(track);
+                    let desktop_sdr = event
+                        .streams
+                        .iter()
+                        .any(|stream| stream.id() == DESKTOP_STREAM_ID);
+                    let _ = track_sender.try_send((track, desktop_sdr));
                 }
                 MediaStreamTrack::Audio(track) if extended => {
                     let _ = audio_sender.try_send(track);
@@ -755,7 +762,7 @@ impl ControllerOffer {
     pub async fn apply_answer(mut self, sdp: &str) -> Result<View, MediaError> {
         let answer = checked_description(sdp, SdpType::Answer, self.pipes.is_some(), self.routed)?;
         self.peer.connection.set_remote_description(answer).await?;
-        let track = timeout(Duration::from_secs(8), self.video.recv())
+        let (track, _desktop_sdr) = timeout(Duration::from_secs(8), self.video.recv())
             .await
             .map_err(|_| MediaError::VideoTimeout)?
             .ok_or(MediaError::VideoTimeout)?;
@@ -767,6 +774,8 @@ impl ControllerOffer {
         );
         Ok(View {
             pixels: PixelPool::default(),
+            #[cfg(any(target_os = "macos", test))]
+            desktop_sdr: _desktop_sdr,
             color_conversion: None,
             peer: self.peer,
             video,
@@ -778,6 +787,8 @@ impl ControllerOffer {
 
 pub struct View {
     pixels: PixelPool,
+    #[cfg(any(target_os = "macos", test))]
+    desktop_sdr: bool,
     color_conversion: Option<&'static str>,
     peer: Peer,
     video: NativeVideoStream,
@@ -803,7 +814,12 @@ impl View {
         let Some(frame) = self.video.next().await else {
             return Ok(None);
         };
-        let pixels = PixelFrame::decode(frame, &self.pixels)?;
+        let pixels = PixelFrame::decode(
+            frame,
+            &self.pixels,
+            #[cfg(target_os = "macos")]
+            self.desktop_sdr,
+        )?;
         self.color_conversion = Some(pixels.color_conversion());
         Ok(Some(pixels))
     }
@@ -1398,6 +1414,10 @@ mod tests {
         sender: &str,
         mut submit: impl FnMut(),
     ) -> Result<(), MediaError> {
+        assert!(
+            view.desktop_sdr,
+            "expected the negotiated NexDesk desktop track"
+        );
         let mut tick = tokio::time::interval(Duration::from_millis(80));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut charts = 0;

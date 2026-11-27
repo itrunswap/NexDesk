@@ -71,7 +71,7 @@ CVPixelBufferRef nexdesk_cv_capture_begin(NexDeskCapturePool *pool) {
 }
 
 // The low bit denotes full range. Zero denotes an unsupported pixel format.
-int nexdesk_cv_color(CVPixelBufferRef image) {
+int nexdesk_cv_color(CVPixelBufferRef image, bool desktop_sdr) {
     if (!image) return 0;
     const OSType format = CVPixelBufferGetPixelFormatType(image);
     if (format != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange &&
@@ -81,7 +81,9 @@ int nexdesk_cv_color(CVPixelBufferRef image) {
     int matrix = ND_601_VIDEO;
     CFTypeRef tag = CVBufferCopyAttachment(image, kCVImageBufferYCbCrMatrixKey, NULL);
     if (tag) {
-        if (CFEqual(tag, kCVImageBufferYCbCrMatrix_ITU_R_709_2)) matrix = ND_709_VIDEO;
+        // VideoToolbox can tag an unlabelled HD H.264 frame as BT.709 without
+        // rematrixing its chroma. NexDesk's own SDR desktop encodes BT.601.
+        if (!desktop_sdr && CFEqual(tag, kCVImageBufferYCbCrMatrix_ITU_R_709_2)) matrix = ND_709_VIDEO;
         if (CFEqual(tag, kCVImageBufferYCbCrMatrix_ITU_R_2020)) matrix = ND_2020_VIDEO;
         CFRelease(tag);
     }

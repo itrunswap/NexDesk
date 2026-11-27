@@ -83,7 +83,11 @@ pub struct PixelFrame {
 }
 
 impl PixelFrame {
-    pub(crate) fn decode(frame: BoxVideoFrame, pool: &PixelPool) -> Result<Self, MediaError> {
+    pub(crate) fn decode(
+        frame: BoxVideoFrame,
+        pool: &PixelPool,
+        #[cfg(target_os = "macos")] desktop_sdr: bool,
+    ) -> Result<Self, MediaError> {
         let decoded_at = Instant::now();
         let width = frame.buffer.width();
         let height = frame.buffer.height();
@@ -99,7 +103,7 @@ impl PixelFrame {
         };
         #[cfg(target_os = "macos")]
         let rgba = FramePixels {
-            native: crate::mac_pixels::DecodedFrame::new(frame),
+            native: crate::mac_pixels::DecodedFrame::new(frame, desktop_sdr),
             portable: std::sync::OnceLock::new(),
             pool: pool.clone(),
         };

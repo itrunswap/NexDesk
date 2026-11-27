@@ -16,7 +16,7 @@ unsafe extern "C" {
     fn CVPixelBufferGetBytesPerRowOfPlane(image: *mut c_void, plane: usize) -> usize;
     fn CVPixelBufferUnlockBaseAddress(image: *mut c_void, flags: u64) -> i32;
     fn CFRelease(value: *const c_void);
-    fn nexdesk_cv_color(image: *mut c_void) -> i32;
+    fn nexdesk_cv_color(image: *mut c_void, desktop_sdr: bool) -> i32;
     fn nexdesk_cv_to_rgb(
         image: *mut c_void,
         color: i32,
@@ -120,13 +120,13 @@ pub(crate) struct DecodedFrame {
 }
 
 impl DecodedFrame {
-    pub(crate) fn new(frame: BoxVideoFrame) -> Self {
+    pub(crate) fn new(frame: BoxVideoFrame, desktop_sdr: bool) -> Self {
         let image = frame
             .buffer
             .as_native()
             .map_or(std::ptr::null_mut(), |native| native.get_cv_pixel_buffer());
         // SAFETY: The WebRTC frame owns this borrowed CVPixelBuffer. Null is accepted.
-        let color = unsafe { nexdesk_cv_color(image) };
+        let color = unsafe { nexdesk_cv_color(image, desktop_sdr) };
         Self { frame, color }
     }
 
@@ -223,6 +223,7 @@ mod tests {
         );
         static kCVImageBufferYCbCrMatrixKey: *const c_void;
         static kCVImageBufferYCbCrMatrix_ITU_R_709_2: *const c_void;
+        static kCVImageBufferYCbCrMatrix_ITU_R_2020: *const c_void;
     }
 
     #[test]
@@ -243,12 +244,22 @@ mod tests {
                     ),
                     0
                 );
+                let range = i32::from(fourcc == b"420f");
+                CVBufferSetAttachment(
+                    cv,
+                    kCVImageBufferYCbCrMatrixKey,
+                    kCVImageBufferYCbCrMatrix_ITU_R_2020,
+                    1,
+                );
+                assert_eq!(nexdesk_cv_color(cv, true), 6 + range);
                 CVBufferSetAttachment(
                     cv,
                     kCVImageBufferYCbCrMatrixKey,
                     kCVImageBufferYCbCrMatrix_ITU_R_709_2,
                     1,
                 );
+                assert_eq!(nexdesk_cv_color(cv, true), 2 + range);
+                assert_eq!(nexdesk_cv_color(cv, false), 4 + range);
                 assert_eq!(CVPixelBufferLockBaseAddress(cv, 0), 0);
                 let luma = CVPixelBufferGetBaseAddressOfPlane(cv, 0);
                 let stride = CVPixelBufferGetBytesPerRowOfPlane(cv, 0);
@@ -264,7 +275,7 @@ mod tests {
                 VideoRotation::VideoRotation0,
                 Box::new(native) as Box<dyn VideoBuffer>,
             );
-            let pixels = PixelFrame::decode(frame, &PixelPool::default()).unwrap();
+            let pixels = PixelFrame::decode(frame, &PixelPool::default(), false).unwrap();
             assert!(pixels.color_conversion().contains("709"));
             assert_eq!(
                 pixels.color_conversion().contains("全范围"),
