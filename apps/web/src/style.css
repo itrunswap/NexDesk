@@ -471,9 +471,13 @@ button.session-trigger[aria-expanded="true"] {
 .viewport {
   height: 100%;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .surface {
+  flex: none;
+  margin: auto;
   width: 100%;
   height: 100%;
   touch-action: none;

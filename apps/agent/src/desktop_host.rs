@@ -163,7 +163,7 @@ enum LocalCommand {
         path: String,
     },
     ApplySettings {
-        config: ReceiverSettings,
+        config: Box<ReceiverSettings>,
     },
     RevokeController {
         request: u64,
@@ -662,7 +662,7 @@ impl DesktopHost {
                     Some(LocalCommand::Revoke) => self.revoke(),
                     Some(LocalCommand::ApplySettings { config }) => {
                         if let Some(receivers) = &mut receivers {
-                            receivers.apply(&self, &host, config).await;
+                            receivers.apply(&self, &host, *config).await;
                         }
                     }
                     Some(LocalCommand::RevokeController {

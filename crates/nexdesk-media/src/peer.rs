@@ -5,7 +5,7 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicU8, Ordering::Relaxed},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use libwebrtc::{
@@ -26,7 +26,6 @@ use libwebrtc::{
     rtp_transceiver::{RtpTransceiverDirection, RtpTransceiverInit},
     session_description::{SdpType, SessionDescription},
     stats::{IceCandidateType, QualityLimitationReason, RtcStats},
-    video_frame::{BoxVideoFrame, VideoFormatType},
     video_source::{VideoResolution, native::NativeVideoSource},
     video_stream::native::{NativeVideoStream, NativeVideoStreamOptions},
     video_track::RtcVideoTrack,
@@ -41,8 +40,10 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 use crate::{
-    CaptureStatus, CaptureTarget, ControlPipe, FrameSize, MediaError, Quality, ReceivedSound,
-    capture::{CaptureSettings, CaptureTask, FrameSink, PROBE_HEIGHT, PROBE_WIDTH, valid_size},
+    CaptureStatus, CaptureTarget, ControlPipe, FrameSize, MediaError, PixelFrame, Quality,
+    ReceivedSound,
+    capture::{CaptureSettings, CaptureTask, FrameSink, PROBE_HEIGHT, PROBE_WIDTH},
+    pixels::PixelPool,
     sound,
 };
 
@@ -149,6 +150,7 @@ pub struct HostPeer {
     peer: Peer,
     feed: Arc<Feed>,
     sender: RtpSender,
+    applied_quality: Mutex<Option<(Quality, Option<u64>)>>,
     preferred_codec: Codec,
     negotiated_codec: Codec,
 }
@@ -296,6 +298,7 @@ impl HostMedia {
                 peer,
                 feed,
                 sender,
+                applied_quality: Mutex::new(None),
                 preferred_codec: preferred,
                 negotiated_codec: chosen,
             },
@@ -314,7 +317,7 @@ impl HostMedia {
             .into_iter()
             .filter(|codec| allow_fallback && *codec != preferred);
         for codec in std::iter::once(preferred).chain(fallback) {
-            let supported: Vec<_> = self
+            let mut supported: Vec<_> = self
                 .codecs
                 .iter()
                 .filter(|entry| entry.mime_type.eq_ignore_ascii_case(codec.mime()))
@@ -323,6 +326,12 @@ impl HostMedia {
             if supported.is_empty() {
                 continue;
             }
+            supported.extend(
+                self.codecs
+                    .iter()
+                    .filter(|entry| entry.mime_type.eq_ignore_ascii_case("video/rtx"))
+                    .cloned(),
+            );
             match restrict_video_offer(offer, codec) {
                 Ok(sdp) => return Ok((codec, supported, sdp)),
                 Err(MediaError::CodecUnavailable) => continue,
@@ -445,9 +454,31 @@ impl HostPeer {
     }
 
     pub fn set_quality(&self, quality: Quality) -> Result<(), MediaError> {
-        quality.apply(&self.sender)?;
+        let mut applied = self
+            .applied_quality
+            .lock()
+            .map_err(|_| MediaError::WebRtc)?;
+        let bitrate = quality.bitrate_limit_for(self.status().source_size());
+        quality.apply(&self.sender, bitrate)?;
         self.feed.settings.set(quality);
+        *applied = Some((quality, bitrate));
         Ok(())
+    }
+
+    pub fn refresh_quality(&self, capture: CaptureStatus) {
+        let Some(size) = capture.source_size() else {
+            return;
+        };
+        let Ok(mut applied) = self.applied_quality.lock() else {
+            return;
+        };
+        let Some((quality, previous)) = applied.as_mut() else {
+            return;
+        };
+        let bitrate = quality.bitrate_limit_for(Some(size));
+        if *previous != bitrate && quality.apply(&self.sender, bitrate).is_ok() {
+            *previous = bitrate;
+        }
     }
 
     pub fn stop_capture(&self) {
@@ -488,17 +519,20 @@ impl HostPeer {
     pub async fn stats(&self) -> Result<MediaStats, MediaError> {
         let mut stats = self.peer.stats(true).await?;
         let capture = self.status();
-        stats.source_size = capture
-            .region
-            .map(|region| FrameSize {
-                width: region.width,
-                height: region.height,
-            })
-            .or(capture.frame_size);
+        stats.source_size = capture.source_size();
+        stats.bitrate_ceiling_bps = self
+            .applied_quality
+            .lock()
+            .ok()
+            .and_then(|value| (*value)?.1);
         stats.capture_size = capture.frame_size;
         stats.capture_work_ms = capture
             .frame_size
             .map(|_| capture.last_frame_work_us as f64 / 1000.0);
+        if capture.frame_size.is_some() {
+            stats.prepare_ms = Some(capture.preparation_us as f64 / 1000.0);
+            stats.submit_ms = Some(capture.submission_us as f64 / 1000.0);
+        }
         stats.requested_codec = Some(self.preferred_codec);
         stats.negotiated_codec = Some(self.negotiated_codec);
         Ok(stats)
@@ -659,6 +693,8 @@ impl ControllerOffer {
             },
         );
         Ok(View {
+            pixels: PixelPool::default(),
+            color_conversion: None,
             peer: self.peer,
             video,
             audio: self.audio.take(),
@@ -668,6 +704,8 @@ impl ControllerOffer {
 }
 
 pub struct View {
+    pixels: PixelPool,
+    color_conversion: Option<&'static str>,
     peer: Peer,
     video: NativeVideoStream,
     audio: Option<mpsc::Receiver<RtcAudioTrack>>,
@@ -692,11 +730,18 @@ impl View {
         let Some(frame) = self.video.next().await else {
             return Ok(None);
         };
-        to_pixel_frame(frame).map(Some)
+        let pixels = PixelFrame::decode(frame, &self.pixels)?;
+        self.color_conversion = Some(pixels.color_conversion());
+        Ok(Some(pixels))
     }
 
     pub async fn stats(&self) -> Result<MediaStats, MediaError> {
-        self.peer.stats(false).await
+        let stats = self.peer.stats(false).await?;
+        let stats = MediaStats {
+            color_conversion: self.color_conversion.map(str::to_owned),
+            ..stats
+        };
+        Ok(stats)
     }
 
     pub fn has_ended(&self) -> bool {
@@ -707,38 +752,6 @@ impl View {
                 | PeerConnectionState::Disconnected
         )
     }
-}
-
-pub struct PixelFrame {
-    pub rgba: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub decoded_at: Instant,
-}
-
-fn to_pixel_frame(frame: BoxVideoFrame) -> Result<PixelFrame, MediaError> {
-    let decoded_at = Instant::now();
-    let width = frame.buffer.width();
-    let height = frame.buffer.height();
-    if !valid_size(width, height) {
-        return Err(MediaError::InvalidFrame);
-    }
-    let stride = width * 4;
-    let mut rgba = vec![0; (stride * height) as usize];
-    // ABGR in libyuv notation has RGBA byte order on our little-endian desktop targets.
-    frame.buffer.to_argb(
-        VideoFormatType::ABGR,
-        &mut rgba,
-        stride,
-        width as i32,
-        height as i32,
-    );
-    Ok(PixelFrame {
-        rgba,
-        width,
-        height,
-        decoded_at,
-    })
 }
 
 type GatheredCandidates = HashMap<String, Vec<String>>;
@@ -885,31 +898,52 @@ fn restrict_video_offer(sdp: &str, codec: Codec) -> Result<String, MediaError> {
         .mime()
         .split_once('/')
         .ok_or(MediaError::CodecUnavailable)?;
-    let mut allowed = HashSet::new();
+    let media = lines[start].split_ascii_whitespace().collect::<Vec<_>>();
+    if media.len() < 4 {
+        return Err(MediaError::InvalidDescription);
+    }
+    let mut primary = HashSet::new();
+    let mut rtx = HashSet::new();
     for line in &lines[start + 1..end] {
         if let Some((payload, description)) = line
             .strip_prefix("a=rtpmap:")
             .and_then(|entry| entry.split_once(' '))
-            && description
-                .split('/')
-                .next()
-                .is_some_and(|name| name.eq_ignore_ascii_case(encoding))
+            && media[3..].contains(&payload)
+            && let Some((name, _clock)) = description.split_once('/')
         {
-            allowed.insert(payload);
+            if name.eq_ignore_ascii_case(encoding) {
+                primary.insert(payload);
+            }
+            if name.eq_ignore_ascii_case("rtx") {
+                rtx.insert(payload);
+            }
         }
     }
-    let media = lines[start].split_ascii_whitespace().collect::<Vec<_>>();
-    if media.len() < 4 {
-        return Err(MediaError::InvalidDescription);
+    if primary.is_empty() {
+        return Err(MediaError::CodecUnavailable);
+    }
+    let mut allowed = primary.clone();
+    for line in &lines[start + 1..end] {
+        if let Some((pt, parameters)) = line.strip_prefix("a=fmtp:").and_then(|s| s.split_once(' '))
+            && rtx.contains(pt)
+        {
+            let mut apt = parameters
+                .split(';')
+                .filter_map(|part| part.trim().split_once('='))
+                .filter(|(key, _)| key.trim().eq_ignore_ascii_case("apt"));
+            if let Some((_, target)) = apt.next()
+                && primary.contains(target.trim())
+                && apt.next().is_none()
+            {
+                allowed.insert(pt);
+            }
+        }
     }
     let formats = media[3..]
         .iter()
         .copied()
         .filter(|pt| allowed.contains(pt))
         .collect::<Vec<_>>();
-    if formats.is_empty() {
-        return Err(MediaError::CodecUnavailable);
-    }
 
     let mut output = lines[..start].join("\r\n");
     if !output.is_empty() {
@@ -990,6 +1024,7 @@ pub struct MediaStats {
     pub video_bytes: u64,
     pub dropped_frames: u32,
     pub lost_packets: i64,
+    pub retransmitted_packets: Option<u64>,
     pub average_jitter_ms: Option<f64>,
     pub audio_packets: u64,
     pub codec_implementation: Option<String>,
@@ -1000,7 +1035,11 @@ pub struct MediaStats {
     pub capture_size: Option<FrameSize>,
     pub frame_size: Option<FrameSize>,
     pub capture_work_ms: Option<f64>,
+    pub prepare_ms: Option<f64>,
+    pub submit_ms: Option<f64>,
+    pub color_conversion: Option<String>,
     pub target_bitrate_bps: Option<u64>,
+    pub bitrate_ceiling_bps: Option<u64>,
     pub limitation: Option<VideoLimitation>,
     pub requested_codec: Option<Codec>,
     pub negotiated_codec: Option<Codec>,
@@ -1046,6 +1085,8 @@ impl MediaStats {
                     if stats.stream.kind == "video" {
                         result.video_codec = codec(&stats.stream.codec_id);
                         result.video_frames = stats.outbound.frames_encoded;
+                        result.retransmitted_packets =
+                            Some(stats.outbound.retransmitted_packets_sent);
                         result.video_bytes = stats.sent.bytes_sent;
                         result.frame_size =
                             measured_size(stats.outbound.frame_width, stats.outbound.frame_height);
@@ -1076,6 +1117,8 @@ impl MediaStats {
                     if stats.stream.kind == "video" {
                         result.video_codec = codec(&stats.stream.codec_id);
                         result.video_frames = stats.inbound.frames_decoded;
+                        result.retransmitted_packets =
+                            Some(stats.inbound.retransmitted_packets_received);
                         result.video_bytes = stats.inbound.bytes_received;
                         result.frame_size =
                             measured_size(stats.inbound.frame_width, stats.inbound.frame_height);
@@ -1198,6 +1241,25 @@ mod tests {
         assert!(restricted.contains("a=rtpmap:111 opus/48000/2\r\n"));
         assert!(!restricted.contains("VP8"));
         assert!(!restricted.contains("apt=96"));
+        Ok(())
+    }
+
+    #[test]
+    fn retransmissions_follow_the_selected_payload_in_offer_order() -> Result<(), MediaError> {
+        let offer = concat!(
+            "m=video 9 UDP/TLS/RTP/SAVPF 97 115 116 114 111\r\n",
+            "a=fmtp:115 rtx-time=300;apt=114\r\na=rtpmap:115 rtx/90000\r\n",
+            "a=rtpmap:116 rtx/90000\r\na=fmtp:116 apt=115\r\n",
+            "a=rtpmap:97 VP8/90000\r\na=rtpmap:114 H264/90000\r\n",
+            "a=rtpmap:111 rtx/90000\r\na=fmtp:111 apt=97\r\n",
+            "a=rtcp-fb:114 nack pli\r\na=rtcp-fb:* transport-cc\r\n"
+        );
+        let answer = restrict_video_offer(offer, Codec::H264)?;
+        assert!(answer.starts_with("m=video 9 UDP/TLS/RTP/SAVPF 115 114\r\n"));
+        assert!(answer.contains("a=fmtp:115 rtx-time=300;apt=114"));
+        assert!(answer.contains("a=rtcp-fb:114 nack pli"));
+        assert!(answer.contains("a=rtcp-fb:* transport-cc"));
+        assert!(!answer.contains("apt=115") && !answer.contains("apt=97"));
         Ok(())
     }
 }

@@ -1,13 +1,11 @@
 enum VideoProfile {
-  auto('自动', 30, StreamResolution.native),
-  clear('文字清晰', 30, StreamResolution.qhd),
-  smooth('操作流畅', 60, StreamResolution.fullHd);
+  auto('自动'),
+  clear('文字清晰'),
+  smooth('操作流畅');
 
-  const VideoProfile(this.label, this.defaultFps, this.defaultResolution);
+  const VideoProfile(this.label);
 
   final String label;
-  final int defaultFps;
-  final StreamResolution defaultResolution;
 
   static VideoProfile parse(Object? value) =>
       values.firstWhere((profile) => profile.name == value, orElse: () => auto);
@@ -78,8 +76,8 @@ final class VideoQuality {
 
   VideoQuality withProfile(VideoProfile next) => VideoQuality(
     profile: next,
-    fps: next.defaultFps,
-    resolution: next.defaultResolution,
+    fps: fps,
+    resolution: resolution,
     maxMbps: maxMbps,
   );
 

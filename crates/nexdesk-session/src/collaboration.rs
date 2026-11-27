@@ -70,7 +70,7 @@ pub enum Reply {
         quality: Quality,
     },
     Diagnostics {
-        media: MediaStats,
+        media: Box<MediaStats>,
         audio: AudioStatus,
     },
     Clipboard {

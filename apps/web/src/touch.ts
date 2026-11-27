@@ -37,11 +37,15 @@ export function videoBounds(
   };
 }
 
-export function constrainView(view: Viewport, size: Point): Viewport {
+export function constrainView(
+  view: Viewport,
+  size: Point,
+  content = size,
+): Viewport {
   const zoom = Math.max(1, Math.min(4, view.zoom));
   return {
-    x: bound(view.x, (size.x * (zoom - 1)) / 2),
-    y: bound(view.y, (size.y * (zoom - 1)) / 2),
+    x: bound(view.x, Math.max(0, (content.x * zoom - size.x) / 2)),
+    y: bound(view.y, Math.max(0, (content.y * zoom - size.y) / 2)),
     zoom,
   };
 }
@@ -59,6 +63,7 @@ export class TouchInput {
   private actions: TouchActions;
   private cursor: Point = { x: 32768, y: 32768 };
   private view: Viewport = { zoom: 1, x: 0, y: 0 };
+  private content?: Point;
   private drag = false;
 
   constructor(actions: TouchActions) {
@@ -130,7 +135,10 @@ export class TouchInput {
     const span = distance(first, second);
     gesture.center = next;
     if (Math.abs(span - gesture.span) > 8) gesture.scaling = true;
-    if (gesture.scaling || this.view.zoom > 1) {
+    const oversized =
+      this.content &&
+      (this.content.x > size.x + 1 || this.content.y > size.y + 1);
+    if (gesture.scaling || this.view.zoom > 1 || oversized) {
       this.view = constrainView(
         {
           zoom: gesture.scaling
@@ -140,6 +148,7 @@ export class TouchInput {
           y: this.view.y + delta.y,
         },
         size,
+        this.content,
       );
       this.actions.view(this.view);
     } else if (canInput) {
@@ -192,8 +201,9 @@ export class TouchInput {
     this.actions.view(this.view);
   }
 
-  resize(size: Point) {
-    const next = constrainView(this.view, size);
+  resize(size: Point, content = size) {
+    this.content = content;
+    const next = constrainView(this.view, size, content);
     if (next.x === this.view.x && next.y === this.view.y) return;
     this.view = next;
     this.actions.view(next);

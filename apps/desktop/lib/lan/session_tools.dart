@@ -624,8 +624,12 @@ class _DiagnosticsState extends State<_Diagnostics> {
             if (configured.maxMbps case final int maxMbps)
               Text('码率上限  $maxMbps Mbps'),
           ],
-          if (sender['capture_work_ms'] case final num work)
-            Text('最近一帧采集与转换  ${_number(work)} ms'),
+          if (sender['prepare_ms'] case final num prepare)
+            Text('最近一帧转换与缩放  ${_number(prepare)} ms'),
+          if (sender['submit_ms'] case final num submit)
+            Text('提交给媒体引擎  ${_number(submit)} ms'),
+          if (sender['bitrate_ceiling_bps'] case final num cap)
+            Text('生效码率上限  ${_number(cap / 1000000)} Mbps'),
           Text('编码限制  $reason'),
           const SizedBox(height: 12),
           Text(
@@ -654,6 +658,8 @@ class _DiagnosticsState extends State<_Diagnostics> {
             Text('视频格式  ${codec.split('/').last.toUpperCase()}'),
           Text('编码  ${sender['codec_implementation'] ?? '—'}'),
           Text('解码  ${received['codec_implementation'] ?? '—'}'),
+          if (received['color_conversion'] case final String color)
+            Text('解码帧颜色  $color'),
           Text(
             '平均编解码耗时  ${_number(sender['average_codec_ms'])} / ${_number(received['average_codec_ms'])} ms',
           ),
@@ -661,6 +667,8 @@ class _DiagnosticsState extends State<_Diagnostics> {
             '丢帧  ${received['dropped_frames'] ?? '—'} · 丢包  ${received['lost_packets'] ?? '—'}',
           ),
           Text('平均抖动缓冲  ${_number(received['average_jitter_ms'])} ms'),
+          if (received['retransmitted_packets'] case final num packets)
+            Text('收到的视频重传包  $packets'),
           Text(
             '系统声音  ${audio['available'] == true ? '采集中' : '未采集'} · 解码 ${sound['decoded'] ?? 0} 帧',
           ),

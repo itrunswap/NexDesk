@@ -1,5 +1,5 @@
 import Cocoa
-import Accelerate
+import CoreVideo
 import FlutterMacOS
 import ServiceManagement
 
@@ -231,27 +231,26 @@ private final class NexDeskBackground: NSObject, NSWindowDelegate {
 
 private final class FrameLibrary {
   typealias Sequence = @convention(c) (UInt64) -> UInt64
-  typealias Acquire = @convention(c) (UInt64, UnsafeMutableRawPointer) -> UnsafeRawPointer?
-  typealias Release = @convention(c) (UnsafeRawPointer) -> Void
+  typealias CopyBGRA = @convention(c) (UInt64, UInt32, UInt32, UnsafeMutableRawPointer, UInt32, Int) -> Bool
 
   let handle: UnsafeMutableRawPointer
   let sequence: Sequence
-  let acquire: Acquire
-  let release: Release
+  let dimensions: Sequence
+  let copyBGRA: CopyBGRA
 
   init?(_ path: String) {
     guard path.hasPrefix("/"), URL(fileURLWithPath: path).lastPathComponent == "libnexdesk_ffi.dylib",
           let library = dlopen(path, RTLD_NOW | RTLD_LOCAL) else { return nil }
     guard let sequence = dlsym(library, "nexdesk_m1_frame_sequence"),
-          let acquire = dlsym(library, "nexdesk_m1_acquire_frame"),
-          let release = dlsym(library, "nexdesk_m1_release_frame") else {
+          let dimensions = dlsym(library, "nexdesk_m1_frame_size"),
+          let copyBGRA = dlsym(library, "nexdesk_m1_copy_bgra") else {
       dlclose(library)
       return nil
     }
     handle = library
     self.sequence = unsafeBitCast(sequence, to: Sequence.self)
-    self.acquire = unsafeBitCast(acquire, to: Acquire.self)
-    self.release = unsafeBitCast(release, to: Release.self)
+    self.dimensions = unsafeBitCast(dimensions, to: Sequence.self)
+    self.copyBGRA = unsafeBitCast(copyBGRA, to: CopyBGRA.self)
   }
 
   deinit { dlclose(handle) }
@@ -260,6 +259,8 @@ private final class FrameLibrary {
 private final class RemoteTexture: NSObject, FlutterTexture {
   let backend: FrameLibrary
   let viewer: UInt64
+  private var pool: CVPixelBufferPool?
+  private var poolDimensions: UInt64 = 0
 
   init(_ backend: FrameLibrary, _ viewer: UInt64) {
     self.backend = backend
@@ -267,28 +268,33 @@ private final class RemoteTexture: NSObject, FlutterTexture {
   }
 
   func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
-    // C layout is a pointer followed by two uint32_t dimensions.
-    let pointerSize = MemoryLayout<UnsafeRawPointer>.size
-    let info = UnsafeMutableRawPointer.allocate(byteCount: pointerSize + 8, alignment: pointerSize)
-    defer { info.deallocate() }
-    guard let lease = backend.acquire(viewer, info) else { return nil }
-    defer { backend.release(lease) }
-    let pixels = info.load(as: UnsafeMutableRawPointer.self)
-    let width = Int(info.load(fromByteOffset: pointerSize, as: UInt32.self))
-    let height = Int(info.load(fromByteOffset: pointerSize + 4, as: UInt32.self))
+    let dimensions = backend.dimensions(viewer)
+    let width = UInt32(dimensions >> 32)
+    let height = UInt32(truncatingIfNeeded: dimensions)
     guard width > 0, height > 0, width <= 4096, height <= 4096 else { return nil }
-
+    if poolDimensions != dimensions {
+      let attributes: [String: Any] = [
+        kCVPixelBufferWidthKey as String: width,
+        kCVPixelBufferHeightKey as String: height,
+        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+        kCVPixelBufferMetalCompatibilityKey as String: true,
+        kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
+      ]
+      var next: CVPixelBufferPool?
+      guard CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &next) == kCVReturnSuccess
+      else { return nil }
+      pool = next
+      poolDimensions = dimensions
+    }
     var output: CVPixelBuffer?
-    let options: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()]
-    guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
-                              options as CFDictionary, &output) == kCVReturnSuccess,
+    let bounds = [kCVPixelBufferPoolAllocationThresholdKey as String: 4] as CFDictionary
+    guard let pool, CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(nil, pool, bounds, &output) == kCVReturnSuccess,
           let image = output, CVPixelBufferLockBaseAddress(image, []) == kCVReturnSuccess else { return nil }
     defer { CVPixelBufferUnlockBaseAddress(image, []) }
     guard let destination = CVPixelBufferGetBaseAddress(image) else { return nil }
-    var source = vImage_Buffer(data: pixels, height: vImagePixelCount(height), width: vImagePixelCount(width), rowBytes: width * 4)
-    var target = vImage_Buffer(data: destination, height: vImagePixelCount(height), width: vImagePixelCount(width), rowBytes: CVPixelBufferGetBytesPerRow(image))
-    let order: [UInt8] = [2, 1, 0, 3]
-    guard vImagePermuteChannels_ARGB8888(&source, &target, order, vImage_Flags(kvImageNoFlags)) == kvImageNoError else { return nil }
+    let stride = CVPixelBufferGetBytesPerRow(image)
+    guard backend.copyBGRA(viewer, width, height, destination, UInt32(stride), stride * Int(height))
+    else { return nil }
     return Unmanaged.passRetained(image)
   }
 }

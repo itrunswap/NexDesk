@@ -2022,6 +2022,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "webrtc-sys",
+ "webrtc-sys-build",
 ]
 
 [[package]]

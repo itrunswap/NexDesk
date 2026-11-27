@@ -158,10 +158,25 @@ class Encoder {
         FAILED(type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive))) {
       return false;
     }
-    if (!output) return SUCCEEDED(transform_->SetInputType(input_id_, type.Get(), 0));
-    return SUCCEEDED(type->SetUINT32(MF_MT_AVG_BITRATE, kBitrate)) &&
-           SUCCEEDED(type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base)) &&
-           SUCCEEDED(transform_->SetOutputType(output_id_, type.Get(), 0));
+    if (output && (FAILED(type->SetUINT32(MF_MT_AVG_BITRATE, kBitrate)) ||
+                   FAILED(type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base)))) {
+      return false;
+    }
+    // Desktop SDR RGB is converted by libyuv's studio-range BT.601 matrix.
+    // Primaries/transfer describe RGB, separately from the YUV matrix.
+    type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+    type->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601);
+    type->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+    type->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_sRGB);
+    auto apply = [&] { return output ? transform_->SetOutputType(output_id_, type.Get(), 0)
+                                     : transform_->SetInputType(input_id_, type.Get(), 0); };
+    if (SUCCEEDED(apply())) return true;
+    // Some hardware transforms accept only the minimal media type.
+    for (const GUID* key : {&MF_MT_VIDEO_NOMINAL_RANGE, &MF_MT_YUV_MATRIX,
+                            &MF_MT_VIDEO_PRIMARIES, &MF_MT_TRANSFER_FUNCTION}) {
+      type->DeleteItem(*key);
+    }
+    return SUCCEEDED(apply());
   }
 
   HRESULT Submit(const uint8_t* pixels) {

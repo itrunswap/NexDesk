@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,6 +60,12 @@ uint64_t nexdesk_m1_texture_wait_us(uint64_t id);
 const void *nexdesk_m1_acquire_frame(uint64_t id,
                                      struct NexDeskPreviewFrame *output);
 void nexdesk_m1_release_frame(const void *frame);
+#if defined(__APPLE__) && TARGET_OS_OSX
+/* Write the newest frame into a caller-locked BGRA texture. No pointer is
+ * retained. False means no frame, changed dimensions, or invalid storage. */
+bool nexdesk_m1_copy_bgra(uint64_t id, uint32_t width, uint32_t height,
+                         uint8_t *destination, uint32_t stride, size_t length);
+#endif
 
 /* M2 viewer IDs also use the status, disconnect and texture operations above.
  * Routed connection errors include 17 (device offline), 18 (directory unavailable), and 19 (TURN unavailable).

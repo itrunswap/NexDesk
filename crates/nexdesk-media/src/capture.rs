@@ -107,7 +107,6 @@ pub fn capture_sources(kind: CaptureKind) -> Result<Vec<CaptureSourceInfo>, Medi
 struct Counters {
     submitted: AtomicU64,
     skipped: AtomicU64,
-    last_frame_work_us: AtomicU64,
     failed: AtomicBool,
     frame: Mutex<Option<CaptureFrame>>,
 }
@@ -116,6 +115,8 @@ struct Counters {
 struct CaptureFrame {
     region: Option<CaptureRegion>,
     size: FrameSize,
+    preparation: Duration,
+    submission: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -131,10 +132,23 @@ pub struct CaptureStatus {
     pub submitted: u64,
     pub skipped: u64,
     pub last_frame_work_us: u64,
+    pub preparation_us: u64,
+    pub submission_us: u64,
     pub unavailable: bool,
     pub hardware_encoded: u64,
     pub region: Option<CaptureRegion>,
     pub frame_size: Option<FrameSize>,
+}
+
+impl CaptureStatus {
+    pub fn source_size(&self) -> Option<FrameSize> {
+        self.region
+            .map(|r| FrameSize {
+                width: r.width,
+                height: r.height,
+            })
+            .or(self.frame_size)
+    }
 }
 
 #[derive(Clone)]
@@ -192,12 +206,17 @@ impl CaptureTask {
                         });
                         let frame = pattern(sequence, size);
                         sequence = sequence.wrapping_add(1);
+                        let prepared = Instant::now();
                         let accepted = source.submit(&frame);
                         record_frame(
                             &shared,
                             accepted,
-                            started,
-                            CaptureFrame { region: None, size },
+                            CaptureFrame {
+                                region: None,
+                                size,
+                                preparation: prepared - started,
+                                submission: prepared.elapsed(),
+                            },
                         );
                     });
                 }
@@ -222,7 +241,10 @@ impl CaptureTask {
         CaptureStatus {
             submitted: self.counters.submitted.load(Relaxed),
             skipped: self.counters.skipped.load(Relaxed),
-            last_frame_work_us: self.counters.last_frame_work_us.load(Relaxed),
+            last_frame_work_us: frame
+                .map_or(0, |f| (f.preparation + f.submission).as_micros() as u64),
+            preparation_us: frame.map_or(0, |f| f.preparation.as_micros() as u64),
+            submission_us: frame.map_or(0, |f| f.submission.as_micros() as u64),
             unavailable: self.counters.failed.load(Relaxed) || encoder_failed,
             hardware_encoded,
             region: frame.and_then(|frame| frame.region),
@@ -269,21 +291,22 @@ fn capture_desktop(
         if stop.load(Relaxed) {
             return;
         }
-        let started = Instant::now();
         match result {
-            Ok((frame, region)) => {
+            Ok((frame, region, started)) => {
                 let size = FrameSize {
                     width: frame.buffer.width(),
                     height: frame.buffer.height(),
                 };
+                let prepared = Instant::now();
                 let accepted = source.submit(&frame);
                 record_frame(
                     &shared,
                     accepted,
-                    started,
                     CaptureFrame {
                         region: Some(region),
                         size,
+                        preparation: prepared - started,
+                        submission: prepared.elapsed(),
                     },
                 );
             }
@@ -303,16 +326,12 @@ fn capture_desktop(
     }
 }
 
-fn record_frame(counters: &Counters, accepted: bool, started: Instant, frame: CaptureFrame) {
+fn record_frame(counters: &Counters, accepted: bool, frame: CaptureFrame) {
     if accepted {
         if let Ok(mut last) = counters.frame.lock() {
             *last = Some(frame);
         }
         counters.submitted.fetch_add(1, Relaxed);
-        counters.last_frame_work_us.store(
-            started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
-            Relaxed,
-        );
     } else {
         counters.skipped.fetch_add(1, Relaxed);
     }

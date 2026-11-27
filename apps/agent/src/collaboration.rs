@@ -77,7 +77,7 @@ impl Collaboration {
                     .map_err(|_| Problem::Unavailable)?
                     .map_err(|_| Problem::Unavailable)?;
                 Ok(Reply::Diagnostics {
-                    media,
+                    media: Box::new(media),
                     audio: peer.sound(),
                 })
             }

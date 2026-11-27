@@ -69,10 +69,11 @@ class VideoQualityFields extends StatelessWidget {
           for (final rate in bandwidths) rate: '$rate Mbps',
         }, (rate) => onChanged(value.withMaxMbps(rate == 0 ? null : rate))),
         const SizedBox(height: 8),
-        Text(
-          '分辨率上限只调整传输画面。实际画质随网络和两端性能调整。',
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
+        Text(switch (value.profile) {
+          VideoProfile.clear => '优先保留文字细节，带宽不足时先降帧。选择「按远端尺寸」可传输原屏像素。',
+          VideoProfile.smooth => '优先保持帧率。快速滚动或播放视频时，可将帧率上限调到 60 FPS。',
+          VideoProfile.auto => '自动平衡清晰度和帧率。传输上限不会改变远端显示器设置。',
+        }, style: Theme.of(context).textTheme.bodySmall),
       ],
     );
   }

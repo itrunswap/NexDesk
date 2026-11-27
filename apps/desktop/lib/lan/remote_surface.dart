@@ -196,13 +196,29 @@ class _RemoteSurfaceState extends State<RemoteSurface>
       }
       final width = widget.frameWidth > 0 ? widget.frameWidth : 1280;
       final height = widget.frameHeight > 0 ? widget.frameHeight : 720;
+      final ratio = MediaQuery.devicePixelRatioOf(context);
       final size = remoteFrameLayout(
         constraints.biggest,
         Size(width.toDouble(), height.toDouble()),
         widget.scale,
-        View.of(context).devicePixelRatio,
+        ratio,
       );
-      final surface = Center(child: _surface(size));
+      double snap(double available, double drawn) {
+        final centered = math.max(0.0, (available - drawn) / 2);
+        return (centered * ratio).round() / ratio - centered;
+      }
+
+      final surface = Center(
+        child: widget.scale == SurfaceScale.fit
+            ? _surface(size)
+            : Transform.translate(
+                offset: Offset(
+                  snap(constraints.maxWidth, size.width),
+                  snap(constraints.maxHeight, size.height),
+                ),
+                child: _surface(size),
+              ),
+      );
       if (size.width <= constraints.maxWidth &&
           size.height <= constraints.maxHeight) {
         return surface;
@@ -274,7 +290,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
             filterQuality: switch (widget.scale) {
               SurfaceScale.original => FilterQuality.none,
               SurfaceScale.fit => FilterQuality.medium,
-              SurfaceScale.enlarge => FilterQuality.low,
+              SurfaceScale.enlarge => FilterQuality.none,
             },
           ),
         ),

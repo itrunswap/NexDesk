@@ -97,25 +97,33 @@ impl Quality {
         (10..=60).contains(&self.fps) && self.max_mbps.is_none_or(|rate| (1..=80).contains(&rate))
     }
 
-    pub fn bitrate_limit(self) -> Option<u64> {
-        use ResolutionLimit::{FullHd, Hd, Qhd, Uhd};
-
-        let mbps = self.max_mbps.or(match (self.preset, self.resolution) {
-            (Preset::Auto, _) => None,
-            (Preset::Clear | Preset::Smooth, Some(Hd)) => Some(6),
-            (Preset::Clear, Some(FullHd)) => Some(10),
-            (Preset::Smooth, Some(FullHd)) => Some(14),
-            (Preset::Clear, Some(Qhd)) => Some(16),
-            (Preset::Smooth, Some(Qhd)) => Some(24),
-            (Preset::Clear, Some(Uhd)) => Some(32),
-            (Preset::Smooth, Some(Uhd)) => Some(48),
-            (Preset::Clear, None) => Some(12),
-            (Preset::Smooth, None) => Some(6),
-        });
-        mbps.map(|value| u64::from(value) * 1_000_000)
+    pub fn bitrate_limit_for(self, source: Option<FrameSize>) -> Option<u64> {
+        if let Some(mbps) = self.max_mbps {
+            return Some(u64::from(mbps) * 1_000_000);
+        }
+        if self.preset == Preset::Auto {
+            return None;
+        }
+        let bounds = self.resolution.map(ResolutionLimit::size);
+        let output = match (source, bounds) {
+            (Some(size), Some(cap)) => size.fit(cap),
+            (Some(size), None) => size,
+            (None, Some(cap)) => cap,
+            (None, None) => ResolutionLimit::Uhd.size(),
+        };
+        let pixels = u64::from(output.width) * u64::from(output.height);
+        let base_mbps = match pixels {
+            ..=921_600 => 6,
+            921_601..=2_073_600 => 10,
+            2_073_601..=3_686_400 => 16,
+            _ => 32,
+        };
+        // 30 FPS uses the tier's base. More frames share prediction work; at
+        // low FPS reserve enough bits per update for fine edges and text.
+        Some(base_mbps * 1_000_000 * (30 + u64::from(self.fps)) / 60)
     }
 
-    pub(crate) fn apply(self, sender: &RtpSender) -> Result<(), MediaError> {
+    pub(crate) fn apply(self, sender: &RtpSender, bitrate: Option<u64>) -> Result<(), MediaError> {
         if !self.valid() {
             return Err(MediaError::InvalidFrame);
         }
@@ -124,7 +132,6 @@ impl Quality {
             Preset::Clear => DegradationPreference::MaintainResolution,
             Preset::Smooth => DegradationPreference::MaintainFramerate,
         };
-        let bitrate = self.bitrate_limit();
         let mut params = sender.parameters();
         if params.encodings.is_empty() {
             return Err(MediaError::WebRtc);
@@ -175,27 +182,38 @@ mod tests {
     }
 
     #[test]
-    fn quality_keeps_legacy_limits_and_allows_bounded_overrides() {
-        let legacy = Quality::new(Preset::Smooth, 30);
-        assert_eq!(legacy.bitrate_limit(), Some(6_000_000));
-        let high = Quality {
-            resolution: Some(ResolutionLimit::Uhd),
-            ..legacy
+    fn rate_follows_transmitted_pixels_and_user_caps() {
+        let clear = Quality::new(Preset::Clear, 30);
+        let fhd = ResolutionLimit::FullHd.size();
+        let uhd = ResolutionLimit::Uhd.size();
+        assert_eq!(clear.bitrate_limit_for(Some(uhd)), Some(32_000_000));
+        assert_eq!(clear.bitrate_limit_for(Some(fhd)), Some(10_000_000));
+        let qhd = Quality {
+            resolution: Some(ResolutionLimit::Qhd),
+            ..clear
         };
-        assert!(high.valid());
-        assert_eq!(high.bitrate_limit(), Some(48_000_000));
+        assert_eq!(qhd.bitrate_limit_for(Some(uhd)), Some(16_000_000));
+        assert_eq!(qhd.bitrate_limit_for(Some(fhd)), Some(10_000_000));
+        assert_eq!(
+            Quality::new(Preset::Smooth, 60).bitrate_limit_for(Some(uhd)),
+            Some(48_000_000)
+        );
+        assert_eq!(
+            Quality::new(Preset::Auto, 30).bitrate_limit_for(Some(uhd)),
+            None
+        );
         assert_eq!(
             Quality {
-                max_mbps: Some(24),
-                ..high
+                max_mbps: Some(8),
+                ..clear
             }
-            .bitrate_limit(),
-            Some(24_000_000)
+            .bitrate_limit_for(None),
+            Some(8_000_000)
         );
         assert!(
             !Quality {
                 max_mbps: Some(81),
-                ..high
+                ..clear
             }
             .valid()
         );

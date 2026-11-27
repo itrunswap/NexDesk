@@ -21,5 +21,7 @@ webrtc-sys = "=0.3.55"
 cc = "1.11.3"
 pkg-config = "0.3.34"
 
+webrtc-sys-build = "=0.3.21"
+
 [lints]
 workspace = true

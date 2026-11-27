@@ -1,6 +1,6 @@
 //! Bounds and checks the desktop capturer's native buffer and source selection.
 
-use std::{slice, sync::Arc};
+use std::{slice, sync::Arc, time::Instant};
 
 use cxx::UniquePtr;
 use libwebrtc::{
@@ -16,7 +16,7 @@ pub(crate) use webrtc_sys::desktop_capturer::{CaptureError, ffi::SourceType};
 
 use crate::{CaptureRegion, FrameSize, MediaError, capture::CaptureSettings};
 
-type CapturedFrame = (VideoFrame<NV12Buffer>, CaptureRegion);
+type CapturedFrame = (VideoFrame<NV12Buffer>, CaptureRegion, Instant);
 
 pub(crate) struct DesktopCapture {
     capturer: UniquePtr<DesktopCapturer>,
@@ -78,7 +78,11 @@ impl DesktopCapture {
         self.capturer
             .pin_mut()
             .start(Box::new(DesktopCapturerCallbackWrapper::new(Box::new(
-                FrameCallback { callback, settings },
+                FrameCallback {
+                    callback,
+                    settings,
+                    scaled_bgra: Vec::new(),
+                },
             ))));
         Ok(())
     }
@@ -91,6 +95,7 @@ impl DesktopCapture {
 struct FrameCallback<F> {
     callback: F,
     settings: Arc<CaptureSettings>,
+    scaled_bgra: Vec<u8>,
 }
 
 impl<F> DesktopCapturerCallback for FrameCallback<F>
@@ -101,13 +106,32 @@ where
         (self.callback)(result.and_then(|frame| {
             frame
                 .as_ref()
-                .and_then(|frame| to_nv12(frame, &self.settings))
+                .and_then(|frame| to_nv12(frame, &self.settings, &mut self.scaled_bgra))
                 .ok_or(CaptureError::Temporary)
         }));
     }
 }
 
-fn to_nv12(frame: &DesktopFrame, settings: &CaptureSettings) -> Option<CapturedFrame> {
+unsafe extern "C" {
+    fn ARGBScale(
+        src: *const u8,
+        stride: i32,
+        width: i32,
+        height: i32,
+        dst: *mut u8,
+        dst_stride: i32,
+        dst_width: i32,
+        dst_height: i32,
+        filter: i32,
+    ) -> i32;
+}
+
+fn to_nv12(
+    frame: &DesktopFrame,
+    settings: &CaptureSettings,
+    scratch: &mut Vec<u8>,
+) -> Option<CapturedFrame> {
+    let started = Instant::now();
     let width = u32::try_from(frame.width()).ok()? & !1;
     let height = u32::try_from(frame.height()).ok()? & !1;
     let stride = u32::try_from(frame.stride()).ok()?;
@@ -125,7 +149,34 @@ fn to_nv12(frame: &DesktopFrame, settings: &CaptureSettings) -> Option<CapturedF
     // SAFETY: DesktopFrame owns at least stride bytes per row until this callback
     // releases it. Dimensions, stride and length are checked above.
     let pixels = unsafe { slice::from_raw_parts(pointer, length) };
-    let mut image = NV12Buffer::new(width, height);
+    let source = FrameSize { width, height };
+    let output = settings.output_size(source);
+    let (pixels, stride) = if source == output {
+        (pixels, stride)
+    } else {
+        let out_stride = output.width * 4;
+        scratch.resize((out_stride * output.height) as usize, 0);
+        // SAFETY: Source and destination are disjoint, validated BGRA planes.
+        // Box filtering precedes chroma subsampling so scaled text retains color edges.
+        let result = unsafe {
+            ARGBScale(
+                pixels.as_ptr(),
+                stride as i32,
+                width as i32,
+                height as i32,
+                scratch.as_mut_ptr(),
+                out_stride as i32,
+                output.width as i32,
+                output.height as i32,
+                3,
+            )
+        };
+        if result != 0 {
+            return None;
+        }
+        (scratch.as_slice(), out_stride)
+    };
+    let mut image = NV12Buffer::new(output.width, output.height);
     let (stride_y, stride_uv) = image.strides();
     let (y, uv) = image.data_mut();
     // Libyuv's little-endian ARGB input matches the capturer's BGRA bytes.
@@ -136,14 +187,9 @@ fn to_nv12(frame: &DesktopFrame, settings: &CaptureSettings) -> Option<CapturedF
         stride_y,
         uv,
         stride_uv,
-        width as i32,
-        height as i32,
+        output.width as i32,
+        output.height as i32,
     );
-    let source = FrameSize { width, height };
-    let output = settings.output_size(source);
-    if source != output {
-        image = image.scale(output.width as i32, output.height as i32);
-    }
     let region = CaptureRegion {
         left: frame.left(),
         top: frame.top(),
@@ -153,5 +199,6 @@ fn to_nv12(frame: &DesktopFrame, settings: &CaptureSettings) -> Option<CapturedF
     Some((
         VideoFrame::new(VideoRotation::VideoRotation0, image),
         region,
+        started,
     ))
 }

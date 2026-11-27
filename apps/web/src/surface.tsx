@@ -101,7 +101,11 @@ export function Surface({
   onToolAction: () => void;
 }) {
   const area = useRef<HTMLDivElement>(null);
+  const viewport = useRef<HTMLDivElement>(null);
   const video = useRef<HTMLVideoElement>(null);
+  const [decoded, setDecoded] = useState({ width: 0, height: 0 });
+  const [ratio, setRatio] = useState(() => window.devicePixelRatio || 1);
+  const [viewportSize, setViewportSize] = useState({ x: 0, y: 0 });
   const pressed = useRef(new Set<number>());
   const held = useRef(new Set<number>());
   const lastMove = useRef(0);
@@ -149,7 +153,12 @@ export function Surface({
   useEffect(() => {
     const player = video.current;
     if (!player) return;
+    const dimensions = () =>
+      setDecoded({ width: player.videoWidth, height: player.videoHeight });
+    player.addEventListener("loadedmetadata", dimensions);
+    player.addEventListener("resize", dimensions);
     player.srcObject = session.stream;
+    dimensions();
     const disconnect = () => {
       held.current.clear();
       pressed.current.clear();
@@ -165,6 +174,8 @@ export function Surface({
     document.addEventListener("visibilitychange", hidden);
     return () => {
       disconnect();
+      player.removeEventListener("loadedmetadata", dimensions);
+      player.removeEventListener("resize", dimensions);
       player.srcObject = null;
       window.removeEventListener("blur", disconnect);
       window.removeEventListener("pagehide", disconnect);
@@ -179,14 +190,45 @@ export function Surface({
   }, [state?.generation, canInput, touch]);
 
   useEffect(() => {
-    const element = area.current;
-    if (!mobile || !element || typeof ResizeObserver === "undefined") return;
+    const resolution = window.matchMedia(`(resolution: ${ratio}dppx)`);
+    const update = () => setRatio(window.devicePixelRatio || 1);
+    resolution.addEventListener("change", update);
+    window.addEventListener("resize", update);
+    update();
+    return () => {
+      resolution.removeEventListener("change", update);
+      window.removeEventListener("resize", update);
+    };
+  }, [ratio]);
+
+  useEffect(() => {
+    const element = viewport.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      touch.resize({ x: element.clientWidth, y: element.clientHeight });
+      setViewportSize({ x: element.clientWidth, y: element.clientHeight });
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [mobile, touch]);
+  }, []);
+
+  const fit =
+    decoded.width && decoded.height
+      ? Math.min(
+          viewportSize.x / decoded.width,
+          viewportSize.y / decoded.height,
+        )
+      : 0;
+  const factor = scale === "fit" ? fit : (scale === "double" ? 2 : 1) / ratio;
+  const drawnWidth = decoded.width * factor;
+  const drawnHeight = decoded.height * factor;
+  const centered = (available: number, drawn: number) =>
+    Math.round(((available - drawn) * ratio) / 2) / ratio;
+  useEffect(() => {
+    if (mobile) touch.resize(viewportSize, { x: drawnWidth, y: drawnHeight });
+  }, [mobile, viewportSize, drawnWidth, drawnHeight, touch]);
+  useEffect(() => {
+    touch.resetZoom();
+  }, [scale, touch, state?.generation]);
 
   useEffect(() => {
     const player = video.current;
@@ -309,7 +351,6 @@ export function Surface({
     }
   }
 
-  const factor = scale === "double" ? 2 : 1;
   const marker = (() => {
     if (!mobile || !cursor || mode !== "trackpad" || !canInput) return;
     const player = video.current;
@@ -397,18 +438,20 @@ export function Surface({
           </>,
           controls,
         )}
-      <div className="viewport">
+      <div className="viewport" ref={viewport}>
         <div
           ref={area}
           className={mobile ? "surface touch-surface" : "surface"}
           tabIndex={0}
           aria-label="远程桌面画面，Shift Escape 释放键鼠焦点"
           style={
-            scale === "fit" || mobile
+            scale === "fit" || mobile || !decoded.width
               ? undefined
               : {
-                  width: (state?.width ?? 640) * factor,
-                  height: (state?.height ?? 360) * factor,
+                  width: drawnWidth,
+                  height: drawnHeight,
+                  marginLeft: Math.max(0, centered(viewportSize.x, drawnWidth)),
+                  marginTop: Math.max(0, centered(viewportSize.y, drawnHeight)),
                 }
           }
           onBlur={release}
@@ -457,11 +500,21 @@ export function Surface({
             playsInline
             muted
             style={
-              mobile
+              mobile && drawnWidth > 0 && drawnHeight > 0
                 ? {
+                    position: "absolute",
+                    left: centered(viewportSize.x, drawnWidth),
+                    top: centered(viewportSize.y, drawnHeight),
+                    width: drawnWidth,
+                    height: drawnHeight,
                     transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`,
+                    imageRendering:
+                      scale === "double" ? "pixelated" : undefined,
                   }
-                : undefined
+                : {
+                    imageRendering:
+                      scale === "double" ? "pixelated" : undefined,
+                  }
             }
           />
           {marker && (

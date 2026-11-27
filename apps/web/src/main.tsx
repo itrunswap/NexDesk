@@ -12,6 +12,7 @@ import {
   type ResumeGrant,
 } from "./protocol";
 import { Files } from "./files";
+import { VideoQualityControls } from "./video-quality";
 import {
   loadConnectionPermissions,
   PermissionsDialog,
@@ -406,8 +407,6 @@ function Workspace({
 }) {
   const [scale, setScale] = useState<"fit" | "actual" | "double">("fit");
   const [volume, setVolume] = useState(0);
-  const [preset, setPreset] = useState("auto");
-  const [fps, setFps] = useState(30);
   const [menuOpen, setMenuOpen] = useState(false);
   const [surfaceControls, setSurfaceControls] = useState<HTMLDivElement | null>(
     null,
@@ -473,16 +472,6 @@ function Workspace({
       () => setStatus(success),
       (error: unknown) => setStatus(errorText(error)),
     );
-  };
-  const applyQuality = (nextPreset: string, nextFps: number) => {
-    run(async () => {
-      await session.collaboration.request({
-        kind: "quality",
-        quality: { preset: nextPreset, fps: nextFps },
-      });
-      setPreset(nextPreset);
-      setFps(nextFps);
-    });
   };
   const sendText = (event: FormEvent) => {
     event.preventDefault();
@@ -638,40 +627,38 @@ function Workspace({
                 ))}
               </select>
             </label>
+            <label>
+              缩放{" "}
+              <select
+                value={scale}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (
+                    value === "fit" ||
+                    value === "actual" ||
+                    value === "double"
+                  )
+                    setScale(value);
+                }}
+              >
+                <option value="fit">适配</option>
+                <option value="actual">原始像素（1:1）</option>
+                <option value="double">200%</option>
+              </select>
+            </label>
             {!mobile && (
-              <>
-                <label>
-                  缩放{" "}
-                  <select
-                    value={scale}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      if (
-                        value === "fit" ||
-                        value === "actual" ||
-                        value === "double"
-                      )
-                        setScale(value);
-                    }}
-                  >
-                    <option value="fit">适配</option>
-                    <option value="actual">原始</option>
-                    <option value="double">200%</option>
-                  </select>
-                </label>
-                <button
-                  onClick={() => {
-                    closeMenu();
-                    run(async () => {
-                      if (document.fullscreenElement)
-                        await document.exitFullscreen();
-                      else await view.current?.requestFullscreen();
-                    });
-                  }}
-                >
-                  {document.fullscreenElement ? "退出全屏" : "全屏"}
-                </button>
-              </>
+              <button
+                onClick={() => {
+                  closeMenu();
+                  run(async () => {
+                    if (document.fullscreenElement)
+                      await document.exitFullscreen();
+                    else await view.current?.requestFullscreen();
+                  });
+                }}
+              >
+                {document.fullscreenElement ? "退出全屏" : "全屏"}
+              </button>
             )}
             {mobile && state?.can_input && (
               <button
@@ -698,30 +685,7 @@ function Workspace({
           <div ref={setSurfaceControls} className="session-surface-controls" />
           <section className="session-options" aria-label="会话设置">
             <div className="bar">
-              <label>
-                画质{" "}
-                <select
-                  value={preset}
-                  onChange={(event) => applyQuality(event.target.value, fps)}
-                >
-                  <option value="auto">自动</option>
-                  <option value="clear">清晰</option>
-                  <option value="smooth">流畅</option>
-                </select>
-              </label>
-              <label>
-                帧率{" "}
-                <select
-                  value={fps}
-                  onChange={(event) =>
-                    applyQuality(preset, Number(event.target.value))
-                  }
-                >
-                  {[15, 30, 45, 60].map((rate) => (
-                    <option key={rate}>{rate}</option>
-                  ))}
-                </select>
-              </label>
+              <VideoQualityControls session={session} />
               {grant(Capability.Audio) && (
                 <>
                   <button onClick={() => setVolume(volume === 0 ? 1 : 0)}>

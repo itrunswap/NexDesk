@@ -148,6 +148,19 @@ class Channel {
       }
     });
   }
+
+  onOpen(callback: () => void) {
+    let active = true;
+    const ready = () => {
+      if (active) callback();
+    };
+    if (this.channel.readyState === "open") queueMicrotask(ready);
+    else this.channel.addEventListener("open", ready, { once: true });
+    return () => {
+      active = false;
+      this.channel.removeEventListener("open", ready);
+    };
+  }
 }
 
 type Route = {
@@ -546,6 +559,25 @@ export class RemoteSession {
 
   async network(): Promise<string> {
     const stats = await this.peer.getStats();
+    const video = [...stats.values()].find(
+      (entry) =>
+        entry.type === "inbound-rtp" &&
+        entry.kind === "video" &&
+        entry.frameWidth > 0 &&
+        entry.frameHeight > 0,
+    );
+    const codec = video && stats.get(video.codecId)?.mimeType?.split("/")[1];
+    const decoded = video
+      ? [
+          `${video.frameWidth} × ${video.frameHeight}`,
+          codec,
+          video.framesPerSecond
+            ? `${Math.round(video.framesPerSecond)} FPS`
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : "";
     for (const record of stats.values()) {
       if (record.type !== "transport" || !record.selectedCandidatePairId)
         continue;
@@ -562,9 +594,15 @@ export class RemoteSession {
         typeof pair.currentRoundTripTime === "number"
           ? ` · RTT ${Math.round(pair.currentRoundTripTime * 1000)} ms`
           : "";
-      return (relay ? "TURN 中继" : "直连") + rtt;
+      return [(relay ? "TURN 中继" : "直连") + rtt, decoded]
+        .filter(Boolean)
+        .join(" · ");
     }
-    return "";
+    return decoded;
+  }
+
+  get qualityKey() {
+    return `nexdesk:quality:v1:${this.options.device}:${this.identity}`;
   }
 
   rememberedMode(display: string, choices: DisplayMode[]) {

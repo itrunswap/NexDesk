@@ -4,8 +4,14 @@ mod capture;
 mod channel;
 #[allow(unsafe_code)]
 mod desktop_capture;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod mac_pixels;
 mod peer;
+mod pixels;
 mod quality;
+#[allow(unsafe_code)]
+mod sdr;
 mod sound;
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
@@ -18,8 +24,9 @@ pub use channel::{CONTROL_PACKET_LIMIT, ControlPipe};
 pub use libwebrtc::peer_connection_factory::IceServer;
 pub use peer::{
     Codec, ControllerOffer, DesktopMediaSettings, DesktopPipes, EncodingPreference, HostMedia,
-    HostPeer, IceOptions, IcePathStats, MediaConfig, MediaStats, PixelFrame, VideoLimitation, View,
+    HostPeer, IceOptions, IcePathStats, MediaConfig, MediaStats, VideoLimitation, View,
 };
+pub use pixels::{FramePixels, PixelFrame};
 pub use quality::{FrameSize, Preset, Quality, ResolutionLimit};
 pub use sound::{ReceivedSound, SoundStatus};
 

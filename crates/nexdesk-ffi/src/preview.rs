@@ -288,17 +288,34 @@ pub unsafe extern "C" fn nexdesk_m1_acquire_frame(
     if output.is_null() {
         return ptr::null();
     }
-    let Some(viewer) = lookup(id) else {
+    let Some((viewer, sequence, frame)) = acquire_latest(id) else {
         return ptr::null();
     };
-    let Ok(latest) = viewer.latest.lock() else {
-        return ptr::null();
+    let pixels = frame.rgba.as_ptr();
+    mark_presented(&viewer, sequence, &frame);
+    // SAFETY: Caller provides a writable struct. The Arc lease keeps pixels valid.
+    unsafe {
+        output.write(PreviewFrame {
+            pixels,
+            width: frame.width,
+            height: frame.height,
+        })
     };
-    let Some(latest) = latest.as_ref() else {
-        return ptr::null();
+    Arc::into_raw(frame).cast::<c_void>()
+}
+
+fn acquire_latest(id: u64) -> Option<(Arc<Viewer>, u64, Arc<PixelFrame>)> {
+    let viewer = lookup(id)?;
+    let (sequence, frame) = {
+        let guard = viewer.latest.lock().ok()?;
+        let latest = guard.as_ref()?;
+        (latest.sequence, latest.frame.clone())
     };
-    let frame = latest.frame.clone();
-    if viewer.last_presented.swap(latest.sequence, Relaxed) != latest.sequence {
+    Some((viewer, sequence, frame))
+}
+
+fn mark_presented(viewer: &Viewer, sequence: u64, frame: &PixelFrame) {
+    if viewer.last_presented.fetch_max(sequence, Relaxed) < sequence {
         viewer.presented.fetch_add(1, Relaxed);
         viewer.last_texture_wait_us.store(
             frame
@@ -309,15 +326,46 @@ pub unsafe extern "C" fn nexdesk_m1_acquire_frame(
             Relaxed,
         );
     }
-    // SAFETY: Caller provides a writable struct. The Arc lease keeps pixels valid.
-    unsafe {
-        output.write(PreviewFrame {
-            pixels: frame.rgba.as_ptr(),
-            width: frame.width,
-            height: frame.height,
-        })
+}
+
+/// Writes straight into the macOS texture's locked BGRA surface. A resolution
+/// change between allocation and acquisition returns false and skips that draw.
+///
+/// # Safety
+/// The caller must exclusively own `length` writable bytes at `destination`
+/// for the duration of this call. No pointer escapes the call.
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nexdesk_m1_copy_bgra(
+    id: u64,
+    width: u32,
+    height: u32,
+    destination: *mut u8,
+    stride: u32,
+    length: usize,
+) -> bool {
+    let Some((viewer, sequence, frame)) = acquire_latest(id) else {
+        return false;
     };
-    Arc::into_raw(frame).cast::<c_void>()
+    let Some(required) = (stride as usize).checked_mul(height as usize) else {
+        return false;
+    };
+    if destination.is_null()
+        || width != frame.width
+        || height != frame.height
+        || !(width * 4..=65_536).contains(&stride)
+        || required > length
+    {
+        return false;
+    }
+    // SAFETY: Caller has locked the OS buffer for writing; the required prefix
+    // is bounded by its declared size and the validated decoded dimensions.
+    let target = unsafe { std::slice::from_raw_parts_mut(destination, required) };
+    let written = frame.copy_bgra(target, stride);
+    if written {
+        mark_presented(&viewer, sequence, &frame);
+    }
+    written
 }
 
 /// Releases a lease acquired by the texture callback.

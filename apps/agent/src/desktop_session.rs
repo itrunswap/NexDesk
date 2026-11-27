@@ -390,6 +390,7 @@ impl RemoteDesktop {
             }
         }
         let status = peer.status();
+        peer.refresh_quality(status);
         if status.unavailable {
             if let Some(fallback) = self
                 .choices

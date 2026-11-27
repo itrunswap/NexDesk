@@ -1,6 +1,8 @@
 name: Package macOS
 
 on:
+  push:
+    tags: ['v*-preview.*']
   workflow_dispatch:
     inputs:
       tag:
@@ -32,18 +34,18 @@ permissions:
 jobs:
   package:
     name: macOS ${{ matrix.arch }}
-    runs-on: ${{ matrix.arch == 'arm64' && inputs.arm_runner || 'macos-15-intel' }}
+    runs-on: ${{ matrix.arch == 'arm64' && (inputs.arm_runner || 'macos-26') || 'macos-15-intel' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        arch: ${{ fromJSON(inputs.architecture == 'all' && '["arm64","x64"]' || format('["{0}"]', inputs.architecture)) }}
+        arch: ${{ fromJSON((github.event_name == 'push' || inputs.architecture == 'all') && '["arm64","x64"]' || format('["{0}"]', inputs.architecture)) }}
 
     steps:
       - name: Check out the release tag
         uses: actions/checkout@v5
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: ${{ github.event_name == 'push' && github.sha || format('refs/tags/{0}', inputs.tag) }}
           path: source
           persist-credentials: false
 
@@ -61,11 +63,12 @@ jobs:
       - name: Verify release version
         working-directory: source
         env:
-          NEXDESK_TAG: ${{ inputs.tag }}
+          NEXDESK_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -eu
           version=$(awk '$1 == "version:" { split($2, parts, "+"); print parts[1] }' apps/desktop/pubspec.yaml)
-          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && $NEXDESK_TAG == "v$version" ]]
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ $NEXDESK_TAG == "v$version" || $NEXDESK_TAG =~ ^v"$version"-preview\.[1-9][0-9]*$ ]]
           printf 'NEXDESK_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
 
       - name: Test the published bundle
@@ -99,7 +102,16 @@ jobs:
         if: ${{ !inputs.verify_download }}
         run: NEXDESK_SOURCE_ROOT="$GITHUB_WORKSPACE/source" bash packaging/tools/release/package-macos.sh
 
-      - name: Verify managed receiver in the signed bundle
+      - name: Verify SDR color conversion and native frame buffers
+        if: ${{ !inputs.verify_download }}
+        working-directory: source
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+        run: |
+          target=$(rustc -vV | awk '$1 == "host:" {print $2}')
+          cargo test --release --locked --target "$target" -p nexdesk-media --lib
+
+      - name: Verify the archived app and start its managed receiver
         if: ${{ !inputs.verify_download }}
         run: |
           set -euo pipefail
@@ -121,8 +133,13 @@ jobs:
           security unlock-keychain -p "$password" "$keychain"
           unset password
           security default-keychain -d user -s "$keychain"
-          python3 packaging/tools/release/check-macos-runtime.py \
-            source/apps/desktop/build/macos/Build/Products/Release/NexDesk.app
+          archive="NexDesk-$NEXDESK_VERSION-Desktop-macOS-${{ matrix.arch }}.zip"
+          archives="$GITHUB_WORKSPACE/source/target/release-$NEXDESK_VERSION"
+          (cd "$archives" && shasum -a 256 -c "$archive.sha256")
+          unpacked=$(mktemp -d "$RUNNER_TEMP/nexdesk-unpacked.XXXXXX")
+          ditto -x -k "$archives/$archive" "$unpacked"
+          codesign --verify --deep --strict "$unpacked/NexDesk.app"
+          python3 packaging/tools/release/check-macos-runtime.py "$unpacked/NexDesk.app"
 
       - name: Save verified archive
         if: ${{ !inputs.verify_download }}
@@ -135,7 +152,7 @@ jobs:
           compression-level: 0
 
       - name: Attach archive to release
-        if: ${{ !inputs.verify_download && !inputs.archive_only }}
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.verify_download && !inputs.archive_only }}
         env:
           GH_TOKEN: ${{ github.token }}
           NEXDESK_TAG: ${{ inputs.tag }}
