@@ -1285,6 +1285,97 @@ fn address_scope(address: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    // Exercises the real encoder and the platform decoder. No desktop capture or input
+    // permissions: both peers are local, and the video source contains only generated pixels.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires local ICE interfaces and platform media codecs"]
+    async fn h264_desktop_sdr_roundtrip() -> Result<(), MediaError> {
+        use libwebrtc::{
+            native::yuv_helper,
+            video_frame::{NV12Buffer, VideoFrame, VideoRotation},
+        };
+        const CHIPS: [[u8; 3]; 12] = [
+            [0; 3],
+            [8; 3],
+            [17; 3],
+            [32; 3],
+            [48; 3],
+            [64; 3],
+            [96; 3],
+            [128; 3],
+            [224; 3],
+            [255; 3],
+            [41, 78, 216],
+            [230, 180, 75],
+        ];
+        let media = HostMedia::new(MediaConfig {
+            capture: CaptureTarget::Pattern,
+            codec: Codec::H264,
+            fps: 2,
+            audio_probe: false,
+            #[cfg(target_os = "windows")]
+            prefer_mf_h264: false,
+        })?;
+        let offer = ControllerOffer::new().await?;
+        let (host, answer) = media.answer(offer.sdp()).await?;
+        let mut view = offer.apply_answer(&answer).await?;
+        let source = match &host.feed.sink {
+            FrameSink::Raw(source) => source,
+            #[cfg(target_os = "windows")]
+            FrameSink::Hardware(_) => panic!("expected raw desktop input"),
+        };
+        let (w, h) = (PROBE_WIDTH, PROBE_HEIGHT);
+        let mut bgra = vec![0; (w * h * 4) as usize];
+        for (i, pixel) in bgra.chunks_exact_mut(4).enumerate() {
+            let [r, g, b] = CHIPS[(i % w as usize) * CHIPS.len() / w as usize];
+            pixel.copy_from_slice(&[b, g, r, 255]);
+        }
+        let mut image = NV12Buffer::new(w, h);
+        let (ys, uvs) = image.strides();
+        let (y, uv) = image.data_mut();
+        yuv_helper::argb_to_nv12(&bgra, w * 4, y, ys, uv, uvs, w as i32, h as i32);
+        let chart = VideoFrame::new(VideoRotation::VideoRotation0, image);
+        let mut tick = tokio::time::interval(Duration::from_millis(80));
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut charts = 0;
+        let (sample, conversion) = timeout(Duration::from_secs(20), async {
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => { source.capture_frame(&chart); }
+                    frame = view.next_frame() => {
+                        let frame = frame?.ok_or(MediaError::VideoTimeout)?;
+                        let mut sample = [[0u8; 3]; CHIPS.len()];
+                        for (n, chip) in sample.iter_mut().enumerate() {
+                            let x = (2 * n + 1) * frame.width as usize / (2 * CHIPS.len());
+                            let i = 4 * (frame.height as usize / 2 * frame.width as usize + x);
+                            chip.copy_from_slice(&frame.rgba[i..i + 3]);
+                        }
+                        // The regular startup pattern is colored and lacks a white band.
+                        if sample[9][1].saturating_sub(sample[0][1]) > 150 {
+                            charts += 1;
+                            if charts == 3 { break Ok::<_, MediaError>((sample, frame.color_conversion())); }
+                        }
+                    }
+                }
+            }
+        }).await.map_err(|_| MediaError::VideoTimeout)??;
+        let stats = view.stats().await?;
+        println!(
+            "H.264 SDR decoded by {:?} ({conversion}), RGB {sample:?}",
+            stats.codec_implementation
+        );
+        for (n, (got, expected)) in sample.iter().zip(CHIPS).enumerate() {
+            let tolerance = if n < 10 { 4 } else { 9 };
+            assert!(
+                got.iter()
+                    .zip(expected)
+                    .all(|(&a, b)| a.abs_diff(b) <= tolerance),
+                "chip {n}: decoded {got:?}, source {expected:?}"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn refreshes_static_text_on_a_picture_change_and_preserves_a_pending_resume() {
         let clear = Quality::new(Preset::Clear, 30);

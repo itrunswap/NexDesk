@@ -123,6 +123,7 @@ jobs:
         run: |
           target=$(rustc -vV | awk '$1 == "host:" {print $2}')
           cargo test --release --locked --target "$target" -p nexdesk-media --lib
+          cargo test --release --locked --target "$target" -p nexdesk-media --lib h264_desktop_sdr_roundtrip -- --ignored --nocapture
 
       - name: Verify the archived app and start its managed receiver
         if: ${{ !inputs.verify_download }}
