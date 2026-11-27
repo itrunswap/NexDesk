@@ -12,16 +12,24 @@ enum VideoProfile {
 }
 
 enum StreamResolution {
-  native(null, '按远端尺寸'),
-  hd('hd', '720p'),
-  fullHd('full_hd', '1080p'),
-  qhd('qhd', '1440p · 2K'),
-  uhd('uhd', '2160p · 4K');
+  native(null, '按远端尺寸', 0, 0),
+  hd('hd', '720p', 1280, 720),
+  fullHd('full_hd', '1080p', 1920, 1080),
+  qhd('qhd', '1440p · 2K', 2560, 1440),
+  uhd('uhd', '2160p · 4K', 3840, 2160);
 
-  const StreamResolution(this.value, this.label);
+  const StreamResolution(this.value, this.label, this.longSide, this.shortSide);
 
   final String? value;
   final String label;
+
+  final int longSide, shortSide;
+
+  bool limits(int width, int height) =>
+      this != native &&
+      (width >= height
+          ? width > longSide || height > shortSide
+          : height > longSide || width > shortSide);
 
   static StreamResolution parse(Object? value) => values.firstWhere(
     (resolution) => resolution.value == value,

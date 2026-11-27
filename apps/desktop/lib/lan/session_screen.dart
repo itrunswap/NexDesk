@@ -156,7 +156,10 @@ class _LanSessionScreenState extends State<LanSessionScreen>
       _qualityApplied = true;
       return;
     }
-    if (native.inspect(viewer)['session'] is! Map) return;
+    final session = native.inspect(viewer)['session'];
+    // The FFI publishes a session object before the collaboration channel attaches.
+    // A zero capability mask is valid for a view-only session.
+    if (session is! Map || session['capabilities'] is! int) return;
     _qualityApplied = true;
     unawaited(
       native
@@ -449,7 +452,7 @@ class _LanSessionScreenState extends State<LanSessionScreen>
   Widget _controls(int viewer, bool active) {
     final theme = Theme.of(context);
     final resolution = active && _frames.width > 0
-        ? ' · ${_frames.width} × ${_frames.height}'
+        ? ' · 当前接收 ${_frames.width} × ${_frames.height}'
         : '';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -492,16 +495,9 @@ class _LanSessionScreenState extends State<LanSessionScreen>
                   _release();
                   setState(() => _scale = scale);
                 },
-                itemBuilder: (_) => const [
-                  PopupMenuItem(value: SurfaceScale.fit, child: Text('适配窗口')),
-                  PopupMenuItem(
-                    value: SurfaceScale.original,
-                    child: Text('原始像素'),
-                  ),
-                  PopupMenuItem(
-                    value: SurfaceScale.enlarge,
-                    child: Text('放大到 200%'),
-                  ),
+                itemBuilder: (_) => [
+                  for (final mode in SurfaceScale.values)
+                    PopupMenuItem(value: mode, child: Text(mode.label)),
                 ],
                 child: const Padding(
                   padding: EdgeInsets.symmetric(vertical: 8, horizontal: 7),
@@ -562,6 +558,10 @@ class _LanSessionScreenState extends State<LanSessionScreen>
               onModePreview: () => _setMenu(true),
               defaultQuality: widget.launch.settings.videoQuality,
               scale: _scale,
+              onQualityApplied: (scale) {
+                setState(() => _scale = scale);
+                _setMenu(false);
+              },
               downloadRoot: widget.launch.settings.downloadRoot,
             ),
         ],

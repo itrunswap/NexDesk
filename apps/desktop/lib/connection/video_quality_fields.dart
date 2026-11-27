@@ -35,33 +35,30 @@ class VideoQualityFields extends StatelessWidget {
           for (final profile in VideoProfile.values) profile: profile.label,
         }, (profile) => onChanged(value.withProfile(profile))),
         const SizedBox(height: 14),
-        LayoutBuilder(
-          builder: (context, limits) {
-            final resolution = _select(
-              '传输分辨率上限',
-              value.resolution,
-              {
-                for (final resolution in StreamResolution.values)
-                  resolution: resolution.label,
-              },
-              (resolution) => onChanged(value.withCaps(resolution: resolution)),
-            );
-            final fps = _select('帧率上限', value.fps, {
-              for (final fps in rates) fps: '$fps FPS',
-            }, (fps) => onChanged(value.withCaps(fps: fps)));
-            if (limits.maxWidth < 330) {
-              return Column(
-                children: [resolution, const SizedBox(height: 14), fps],
-              );
-            }
-            return Row(
-              children: [
-                Expanded(flex: 3, child: resolution),
-                const SizedBox(width: 12),
-                Expanded(flex: 2, child: fps),
-              ],
-            );
-          },
+        Wrap(
+          spacing: 12,
+          runSpacing: 14,
+          children: [
+            SizedBox(
+              width: 192,
+              child: _select(
+                '传输分辨率上限',
+                value.resolution,
+                {
+                  for (final resolution in StreamResolution.values)
+                    resolution: resolution.label,
+                },
+                (resolution) =>
+                    onChanged(value.withCaps(resolution: resolution)),
+              ),
+            ),
+            SizedBox(
+              width: 126,
+              child: _select('帧率上限', value.fps, {
+                for (final fps in rates) fps: '$fps FPS',
+              }, (fps) => onChanged(value.withCaps(fps: fps))),
+            ),
+          ],
         ),
         const SizedBox(height: 14),
         _select('视频码率上限', value.maxMbps ?? 0, {
@@ -70,7 +67,7 @@ class VideoQualityFields extends StatelessWidget {
         }, (rate) => onChanged(value.withMaxMbps(rate == 0 ? null : rate))),
         const SizedBox(height: 8),
         Text(switch (value.profile) {
-          VideoProfile.clear => '优先保留文字细节，带宽不足时先降帧。选择「按远端尺寸」可传输原屏像素。',
+          VideoProfile.clear => '优先保留文字笔画和传输分辨率，带宽不足时先降帧。',
           VideoProfile.smooth => '优先保持帧率。快速滚动或播放视频时，可将帧率上限调到 60 FPS。',
           VideoProfile.auto => '自动平衡清晰度和帧率。传输上限不会改变远端显示器设置。',
         }, style: Theme.of(context).textTheme.bodySmall),

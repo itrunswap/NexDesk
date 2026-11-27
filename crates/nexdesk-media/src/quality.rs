@@ -112,11 +112,16 @@ impl Quality {
             (None, None) => ResolutionLimit::Uhd.size(),
         };
         let pixels = u64::from(output.width) * u64::from(output.height);
-        let base_mbps = match pixels {
-            ..=921_600 => 6,
-            921_601..=2_073_600 => 10,
-            2_073_601..=3_686_400 => 16,
-            _ => 32,
+        let (smooth, clear) = match pixels {
+            ..=921_600 => (6, 8),
+            921_601..=2_073_600 => (10, 16),
+            2_073_601..=3_686_400 => (16, 24),
+            _ => (32, 48),
+        };
+        let base_mbps = if self.preset == Preset::Clear {
+            clear
+        } else {
+            smooth
         };
         // 30 FPS uses the tier's base. More frames share prediction work; at
         // low FPS reserve enough bits per update for fine edges and text.
@@ -186,14 +191,14 @@ mod tests {
         let clear = Quality::new(Preset::Clear, 30);
         let fhd = ResolutionLimit::FullHd.size();
         let uhd = ResolutionLimit::Uhd.size();
-        assert_eq!(clear.bitrate_limit_for(Some(uhd)), Some(32_000_000));
-        assert_eq!(clear.bitrate_limit_for(Some(fhd)), Some(10_000_000));
+        assert_eq!(clear.bitrate_limit_for(Some(uhd)), Some(48_000_000));
+        assert_eq!(clear.bitrate_limit_for(Some(fhd)), Some(16_000_000));
         let qhd = Quality {
             resolution: Some(ResolutionLimit::Qhd),
             ..clear
         };
-        assert_eq!(qhd.bitrate_limit_for(Some(uhd)), Some(16_000_000));
-        assert_eq!(qhd.bitrate_limit_for(Some(fhd)), Some(10_000_000));
+        assert_eq!(qhd.bitrate_limit_for(Some(uhd)), Some(24_000_000));
+        assert_eq!(qhd.bitrate_limit_for(Some(fhd)), Some(16_000_000));
         assert_eq!(
             Quality::new(Preset::Smooth, 60).bitrate_limit_for(Some(uhd)),
             Some(48_000_000)

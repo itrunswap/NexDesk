@@ -6,23 +6,53 @@ import 'package:flutter/services.dart';
 
 import 'native_desktop.dart';
 
-enum SurfaceScale { fit, original, enlarge }
+enum SurfaceScale {
+  fit('适配窗口'),
+  original('原始像素'),
+  enlarge('放大到 200%');
 
-Size remoteFrameLayout(
+  const SurfaceScale(this.label);
+  final String label;
+}
+
+Size sessionViewport(BuildContext context) {
+  final window = MediaQuery.sizeOf(context);
+  final ratio = MediaQuery.devicePixelRatioOf(context);
+  final padding = View.of(context).padding;
+  return Size(
+    window.width - (padding.left + padding.right) / ratio,
+    window.height - (padding.top + padding.bottom) / ratio,
+  );
+}
+
+({Size size, double physicalScale, FilterQuality filter}) remoteFrameLayout(
   Size viewport,
   Size frame,
   SurfaceScale scale,
   double pixelRatio,
 ) {
+  final fit = math.min(
+    viewport.width * pixelRatio / frame.width,
+    viewport.height * pixelRatio / frame.height,
+  );
+  final whole = fit.floor();
+  // At most 1% margin per side avoids filtering small type for a few spare pixels.
   final factor = switch (scale) {
-    SurfaceScale.fit => math.min(
-      viewport.width / frame.width,
-      viewport.height / frame.height,
-    ),
-    SurfaceScale.original => 1 / pixelRatio,
-    SurfaceScale.enlarge => 2 / pixelRatio,
+    SurfaceScale.fit when whole >= 1 && fit <= whole * 1.02 => whole.toDouble(),
+    SurfaceScale.fit => fit,
+    SurfaceScale.original => 1.0,
+    SurfaceScale.enlarge => 2.0,
   };
-  return frame * factor;
+  final filter = factor >= 1 && factor == factor.roundToDouble()
+      ? FilterQuality.none
+      : factor > 0.5
+      ? FilterQuality.high
+      : FilterQuality.medium;
+  return (
+    size: frame * (factor / pixelRatio),
+    physicalScale: factor,
+    filter: filter,
+  );
 }
 
 typedef DesktopActionSender = bool Function(
@@ -197,27 +227,26 @@ class _RemoteSurfaceState extends State<RemoteSurface>
       final width = widget.frameWidth > 0 ? widget.frameWidth : 1280;
       final height = widget.frameHeight > 0 ? widget.frameHeight : 720;
       final ratio = MediaQuery.devicePixelRatioOf(context);
-      final size = remoteFrameLayout(
+      final layout = remoteFrameLayout(
         constraints.biggest,
         Size(width.toDouble(), height.toDouble()),
         widget.scale,
         ratio,
       );
+      final size = layout.size;
       double snap(double available, double drawn) {
         final centered = math.max(0.0, (available - drawn) / 2);
         return (centered * ratio).round() / ratio - centered;
       }
 
       final surface = Center(
-        child: widget.scale == SurfaceScale.fit
-            ? _surface(size)
-            : Transform.translate(
-                offset: Offset(
-                  snap(constraints.maxWidth, size.width),
-                  snap(constraints.maxHeight, size.height),
-                ),
-                child: _surface(size),
-              ),
+        child: Transform.translate(
+          offset: Offset(
+            snap(constraints.maxWidth, size.width),
+            snap(constraints.maxHeight, size.height),
+          ),
+          child: _surface(size, layout.filter),
+        ),
       );
       if (size.width <= constraints.maxWidth &&
           size.height <= constraints.maxHeight) {
@@ -252,7 +281,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
     },
   );
 
-  Widget _surface(Size size) => SizedBox.fromSize(
+  Widget _surface(Size size, FilterQuality filter) => SizedBox.fromSize(
     size: size,
     child: Focus(
       focusNode: widget.focus,
@@ -285,14 +314,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
               _wheel(event.localPosition, -event.localPanDelta, size);
             }
           },
-          child: Texture(
-            textureId: widget.texture,
-            filterQuality: switch (widget.scale) {
-              SurfaceScale.original => FilterQuality.none,
-              SurfaceScale.fit => FilterQuality.medium,
-              SurfaceScale.enlarge => FilterQuality.none,
-            },
-          ),
+          child: Texture(textureId: widget.texture, filterQuality: filter),
         ),
       ),
     ),

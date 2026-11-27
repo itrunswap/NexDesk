@@ -4,10 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../connection/video_quality.dart';
-import '../connection/video_quality_fields.dart';
 import 'file_panel.dart';
 import 'native_collaboration.dart';
 import 'remote_surface.dart';
+import 'session_quality_dialog.dart';
 
 class SessionTools extends StatefulWidget {
   const SessionTools({
@@ -23,6 +23,7 @@ class SessionTools extends StatefulWidget {
     required this.release,
     required this.onModePreview,
     required this.scale,
+    required this.onQualityApplied,
     this.defaultQuality = const VideoQuality(),
     this.downloadRoot = '',
   });
@@ -36,6 +37,7 @@ class SessionTools extends StatefulWidget {
   final VoidCallback release, onModePreview;
   final VideoQuality defaultQuality;
   final SurfaceScale scale;
+  final ValueChanged<SurfaceScale> onQualityApplied;
   final String downloadRoot;
 
   @override
@@ -140,45 +142,67 @@ class _SessionToolsState extends State<SessionTools> {
 
   Future<void> _quality() => _run(() async {
     widget.release();
-    final active = _map(
-      _map(widget.native.inspect(widget.viewer)['session'])['quality'],
-    );
-    var draft = active.isEmpty
+    final viewer = widget.viewer;
+    final native = widget.native;
+    final active = _map(_map(native.inspect(viewer)['session'])['quality']);
+    final initial = active.isEmpty
         ? widget.defaultQuality
         : VideoQuality.fromJson(active);
-    final selected = await showDialog<VideoQuality>(
+    final scale = widget.scale;
+    final selected = await showDialog<AppliedSessionQuality>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, update) => AlertDialog(
-          title: const Text('画质与帧率'),
-          scrollable: true,
-          content: SizedBox(
-            width: 350,
-            child: VideoQualityFields(
-              value: draft,
-              onChanged: (value) => update(() => draft = value),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, draft),
-              child: const Text('应用'),
-            ),
-          ],
-        ),
+      builder: (_) => SessionQualityDialog(
+        initial: initial,
+        remoteConfirmed: active.isNotEmpty,
+        scale: scale,
+        readDecoded: () => _frameSize(native.inspect(viewer)['decoded_frame']),
+        readSource: () async {
+          final reply = await native.remote(viewer, 'diagnostics');
+          return _frameSize(_map(_map(reply['ok'])['media'])['source_size']);
+        },
+        apply: (quality) => native.setQuality(viewer, quality),
       ),
     );
-    if (!mounted || selected == null) return;
-    final applied = await widget.native.setQuality(widget.viewer, selected);
-    if (!mounted) return;
-    _refresh();
-    if (!applied.matches(selected)) {
-      _message('被控端只应用了部分画质设置。');
-    }
+    if (!mounted || widget.viewer != viewer || selected == null) return;
+    widget.onQualityApplied(selected.scale);
+    final applied = selected.quality;
+    final status = !selected.sent
+        ? '已更新本地显示'
+        : selected.complete
+        ? '被控端已确认'
+        : '被控端仅确认部分设置';
+    final summary = [
+      status,
+      if (selected.sent) ...[
+        applied.profile.label,
+        applied.resolution.label,
+        '${applied.fps} FPS',
+        if (applied.maxMbps case final rate?) '$rate Mbps 上限',
+      ],
+      selected.scale.label,
+    ].join(' · ');
+    Size received() => _frameSize(native.inspect(viewer)['decoded_frame']);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: StreamBuilder<Size>(
+            initialData: received(),
+            stream: Stream<Size>.periodic(
+              const Duration(milliseconds: 500),
+              (_) => received(),
+            ).distinct(),
+            builder: (context, snapshot) {
+              final size = snapshot.data ?? Size.zero;
+              return Text(
+                size.isEmpty
+                    ? summary
+                    : '$summary\n当前接收 ${size.width.round()} × ${size.height.round()}',
+              );
+            },
+          ),
+        ),
+      );
   });
 
   Future<void> _chooseMode() => _run(() async {
@@ -373,7 +397,7 @@ class _SessionToolsState extends State<SessionTools> {
             TextButton.icon(
               icon: const Icon(Icons.tune),
               label: const Text('画质'),
-              onPressed: _quality,
+              onPressed: _grant == null ? null : _quality,
             ),
             if (_can(CollaborationCapability.display) &&
                 widget.display.isNotEmpty)
@@ -584,16 +608,11 @@ class _DiagnosticsState extends State<_Diagnostics> {
       (decoded['width'] as num?)?.toDouble() ?? 0,
       (decoded['height'] as num?)?.toDouble() ?? 0,
     );
-    final window = MediaQuery.sizeOf(context);
     final ratio = MediaQuery.devicePixelRatioOf(context);
-    final padding = View.of(context).padding;
-    final viewport = Size(
-      window.width - (padding.left + padding.right) / ratio,
-      window.height - (padding.top + padding.bottom) / ratio,
-    );
+    final viewport = sessionViewport(context);
     final drawn = frame.isEmpty || viewport.isEmpty
         ? Size.zero
-        : remoteFrameLayout(viewport, frame, widget.scale, ratio) * ratio;
+        : remoteFrameLayout(viewport, frame, widget.scale, ratio).size * ratio;
     final bitrate = sender['target_bitrate_bps'];
     final reason = switch (sender['limitation']) {
       'bandwidth' => '网络带宽',
@@ -614,6 +633,8 @@ class _DiagnosticsState extends State<_Diagnostics> {
           Text('远端采集  ${_size(sender['source_size'])}'),
           Text('送入编码  ${_size(sender['capture_size'])}'),
           Text('实际发送  ${_size(sender['frame_size'])}'),
+          if (sender['text_detail'] case final bool enhanced)
+            Text('采集帧文字增强  ${enhanced ? '已启用' : '已关闭'}'),
           Text('本机解码  ${_size(decoded)}'),
           if (!drawn.isEmpty)
             Text('本地绘制  ${drawn.width.round()} × ${drawn.height.round()}'),
@@ -685,12 +706,16 @@ class _DiagnosticsState extends State<_Diagnostics> {
 }
 
 String _size(Object? value) {
-  final size = _map(value);
-  final width = size['width'];
-  final height = size['height'];
+  final size = _frameSize(value);
+  return size.isEmpty ? '—' : '${size.width.round()} × ${size.height.round()}';
+}
+
+Size _frameSize(Object? value) {
+  final map = _map(value);
+  final width = map['width'], height = map['height'];
   return width is num && height is num && width > 0 && height > 0
-      ? '$width × $height'
-      : '—';
+      ? Size(width.toDouble(), height.toDouble())
+      : Size.zero;
 }
 
 Map<String, Object?> _map(Object? value) =>

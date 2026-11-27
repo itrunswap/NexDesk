@@ -13,6 +13,7 @@ mod quality;
 #[allow(unsafe_code)]
 mod sdr;
 mod sound;
+mod text_detail;
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
 mod windows_h264;

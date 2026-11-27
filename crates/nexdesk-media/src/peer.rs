@@ -40,7 +40,7 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 use crate::{
-    CaptureStatus, CaptureTarget, ControlPipe, FrameSize, MediaError, PixelFrame, Quality,
+    CaptureStatus, CaptureTarget, ControlPipe, FrameSize, MediaError, PixelFrame, Preset, Quality,
     ReceivedSound,
     capture::{CaptureSettings, CaptureTask, FrameSink, PROBE_HEIGHT, PROBE_WIDTH},
     pixels::PixelPool,
@@ -150,9 +150,77 @@ pub struct HostPeer {
     peer: Peer,
     feed: Arc<Feed>,
     sender: RtpSender,
-    applied_quality: Mutex<Option<(Quality, Option<u64>)>>,
+    applied_quality: Mutex<Option<AppliedQuality>>,
     preferred_codec: Codec,
     negotiated_codec: Codec,
+}
+
+struct AppliedQuality {
+    quality: Quality,
+    bitrate: Option<u64>,
+    refresh: PictureRefresh,
+}
+
+impl AppliedQuality {
+    fn updated(previous: Option<&Self>, quality: Quality, bitrate: Option<u64>) -> Self {
+        let mut refresh = previous.map(|state| state.refresh).unwrap_or_default();
+        let detail = quality.preset == Preset::Clear;
+        let had_detail = previous.is_some_and(|state| state.quality.preset == Preset::Clear);
+        let raised_bitrate = previous
+            .and_then(|state| state.bitrate)
+            .zip(bitrate)
+            .is_some_and(|(old, new)| new > old);
+        if refresh != PictureRefresh::Resume && (detail != had_detail || detail && raised_bitrate) {
+            refresh = PictureRefresh::AfterCapture;
+        }
+        Self {
+            quality,
+            bitrate,
+            refresh,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PictureRefresh {
+    #[default]
+    Idle,
+    AfterCapture,
+    Resume,
+}
+
+impl PictureRefresh {
+    fn poll(&mut self, sender: &RtpSender) {
+        // Resume the single desktop encoding to refresh its prediction reference. The
+        // pinned sender API exposes encoding.active but no explicit key-frame request.
+        if *self == Self::AfterCapture {
+            let mut params = sender.parameters();
+            let [encoding] = params.encodings.as_mut_slice() else {
+                *self = Self::Idle;
+                return;
+            };
+            if !encoding.active {
+                *self = Self::Idle;
+                return;
+            }
+            encoding.active = false;
+            if sender.set_parameters(params).is_err() {
+                // Transmission is still active. Avoid retrying an optional refresh every tick.
+                *self = Self::Idle;
+                return;
+            }
+            *self = Self::Resume;
+        }
+        if *self == Self::Resume {
+            let mut params = sender.parameters();
+            if let [encoding] = params.encodings.as_mut_slice() {
+                encoding.active = true;
+                if sender.set_parameters(params).is_ok() {
+                    *self = Self::Idle;
+                }
+            }
+        }
+    }
 }
 
 pub struct DesktopPipes {
@@ -461,23 +529,27 @@ impl HostPeer {
         let bitrate = quality.bitrate_limit_for(self.status().source_size());
         quality.apply(&self.sender, bitrate)?;
         self.feed.settings.set(quality);
-        *applied = Some((quality, bitrate));
+        *applied = Some(AppliedQuality::updated(applied.as_ref(), quality, bitrate));
         Ok(())
     }
 
     pub fn refresh_quality(&self, capture: CaptureStatus) {
-        let Some(size) = capture.source_size() else {
-            return;
-        };
         let Ok(mut applied) = self.applied_quality.lock() else {
             return;
         };
-        let Some((quality, previous)) = applied.as_mut() else {
+        let Some(state) = applied.as_mut() else {
             return;
         };
-        let bitrate = quality.bitrate_limit_for(Some(size));
-        if *previous != bitrate && quality.apply(&self.sender, bitrate).is_ok() {
-            *previous = bitrate;
+        if state.refresh == PictureRefresh::Resume
+            || capture.text_detail == Some(state.quality.preset == Preset::Clear)
+        {
+            state.refresh.poll(&self.sender);
+        }
+        if let Some(size) = capture.source_size() {
+            let bitrate = state.quality.bitrate_limit_for(Some(size));
+            if state.bitrate != bitrate && state.quality.apply(&self.sender, bitrate).is_ok() {
+                state.bitrate = bitrate;
+            }
         }
     }
 
@@ -524,8 +596,9 @@ impl HostPeer {
             .applied_quality
             .lock()
             .ok()
-            .and_then(|value| (*value)?.1);
+            .and_then(|value| value.as_ref()?.bitrate);
         stats.capture_size = capture.frame_size;
+        stats.text_detail = capture.text_detail;
         stats.capture_work_ms = capture
             .frame_size
             .map(|_| capture.last_frame_work_us as f64 / 1000.0);
@@ -1033,6 +1106,8 @@ pub struct MediaStats {
     pub ice: Option<IcePathStats>,
     pub source_size: Option<FrameSize>,
     pub capture_size: Option<FrameSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_detail: Option<bool>,
     pub frame_size: Option<FrameSize>,
     pub capture_work_ms: Option<f64>,
     pub prepare_ms: Option<f64>,
@@ -1209,6 +1284,33 @@ fn address_scope(address: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refreshes_static_text_on_a_picture_change_and_preserves_a_pending_resume() {
+        let clear = Quality::new(Preset::Clear, 30);
+        let smooth = Quality::new(Preset::Smooth, 30);
+        let rate = Some(16_000_000);
+        let mut state = AppliedQuality::updated(None, clear, rate);
+        assert_eq!(state.refresh, PictureRefresh::AfterCapture);
+        state.refresh = PictureRefresh::Idle;
+        assert_eq!(
+            AppliedQuality::updated(Some(&state), clear, rate).refresh,
+            PictureRefresh::Idle
+        );
+        assert_eq!(
+            AppliedQuality::updated(Some(&state), smooth, rate).refresh,
+            PictureRefresh::AfterCapture
+        );
+        assert_eq!(
+            AppliedQuality::updated(Some(&state), clear, Some(24_000_000)).refresh,
+            PictureRefresh::AfterCapture
+        );
+        state.refresh = PictureRefresh::Resume;
+        assert_eq!(
+            AppliedQuality::updated(Some(&state), smooth, rate).refresh,
+            PictureRefresh::Resume
+        );
+    }
 
     #[test]
     fn relay_only_signals_only_turn_candidates() {

@@ -16,7 +16,7 @@ use serde::Serialize;
 #[cfg(target_os = "windows")]
 use crate::windows_h264::HardwareSink;
 use crate::{
-    FrameSize, MediaError, Quality, ResolutionLimit,
+    FrameSize, MediaError, Preset, Quality, ResolutionLimit,
     desktop_capture::{CaptureError, DesktopCapture, SourceType},
 };
 
@@ -28,6 +28,7 @@ pub(crate) const MAX_HEIGHT: u32 = 4096;
 pub(crate) struct CaptureSettings {
     pub(crate) fps: AtomicU16,
     resolution: AtomicU8,
+    pub(crate) text_detail: AtomicBool,
 }
 
 impl CaptureSettings {
@@ -35,10 +36,13 @@ impl CaptureSettings {
         Self {
             fps: AtomicU16::new(fps),
             resolution: AtomicU8::new(0),
+            text_detail: AtomicBool::new(false),
         }
     }
 
     pub(crate) fn set(&self, quality: Quality) {
+        self.text_detail
+            .store(quality.preset == Preset::Clear, Relaxed);
         self.resolution
             .store(quality.resolution.map_or(0, |limit| limit as u8), Relaxed);
         self.fps.store(quality.fps, Relaxed);
@@ -114,6 +118,7 @@ struct Counters {
 #[derive(Clone, Copy)]
 struct CaptureFrame {
     region: Option<CaptureRegion>,
+    text_detail: Option<bool>,
     size: FrameSize,
     preparation: Duration,
     submission: Duration,
@@ -138,6 +143,7 @@ pub struct CaptureStatus {
     pub hardware_encoded: u64,
     pub region: Option<CaptureRegion>,
     pub frame_size: Option<FrameSize>,
+    pub text_detail: Option<bool>,
 }
 
 impl CaptureStatus {
@@ -213,6 +219,7 @@ impl CaptureTask {
                             accepted,
                             CaptureFrame {
                                 region: None,
+                                text_detail: None,
                                 size,
                                 preparation: prepared - started,
                                 submission: prepared.elapsed(),
@@ -249,6 +256,7 @@ impl CaptureTask {
             hardware_encoded,
             region: frame.and_then(|frame| frame.region),
             frame_size: frame.map(|frame| frame.size),
+            text_detail: frame.and_then(|frame| frame.text_detail),
         }
     }
 }
@@ -292,7 +300,8 @@ fn capture_desktop(
             return;
         }
         match result {
-            Ok((frame, region, started)) => {
+            Ok(captured) => {
+                let frame = captured.frame;
                 let size = FrameSize {
                     width: frame.buffer.width(),
                     height: frame.buffer.height(),
@@ -303,9 +312,10 @@ fn capture_desktop(
                     &shared,
                     accepted,
                     CaptureFrame {
-                        region: Some(region),
+                        region: Some(captured.region),
+                        text_detail: Some(captured.text_detail),
                         size,
-                        preparation: prepared - started,
+                        preparation: prepared - captured.started,
                         submission: prepared.elapsed(),
                     },
                 );

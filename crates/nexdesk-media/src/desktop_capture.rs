@@ -14,9 +14,15 @@ use webrtc_sys::desktop_capturer::{
 
 pub(crate) use webrtc_sys::desktop_capturer::{CaptureError, ffi::SourceType};
 
+use crate::text_detail::TextDetail;
 use crate::{CaptureRegion, FrameSize, MediaError, capture::CaptureSettings};
 
-type CapturedFrame = (VideoFrame<NV12Buffer>, CaptureRegion, Instant);
+pub(crate) struct CapturedFrame {
+    pub(crate) frame: VideoFrame<NV12Buffer>,
+    pub(crate) region: CaptureRegion,
+    pub(crate) started: Instant,
+    pub(crate) text_detail: bool,
+}
 
 pub(crate) struct DesktopCapture {
     capturer: UniquePtr<DesktopCapturer>,
@@ -82,6 +88,7 @@ impl DesktopCapture {
                     callback,
                     settings,
                     scaled_bgra: Vec::new(),
+                    detail: TextDetail::default(),
                 },
             ))));
         Ok(())
@@ -96,6 +103,7 @@ struct FrameCallback<F> {
     callback: F,
     settings: Arc<CaptureSettings>,
     scaled_bgra: Vec<u8>,
+    detail: TextDetail,
 }
 
 impl<F> DesktopCapturerCallback for FrameCallback<F>
@@ -106,7 +114,14 @@ where
         (self.callback)(result.and_then(|frame| {
             frame
                 .as_ref()
-                .and_then(|frame| to_nv12(frame, &self.settings, &mut self.scaled_bgra))
+                .and_then(|frame| {
+                    to_nv12(
+                        frame,
+                        &self.settings,
+                        &mut self.scaled_bgra,
+                        &mut self.detail,
+                    )
+                })
                 .ok_or(CaptureError::Temporary)
         }));
     }
@@ -130,6 +145,7 @@ fn to_nv12(
     frame: &DesktopFrame,
     settings: &CaptureSettings,
     scratch: &mut Vec<u8>,
+    detail: &mut TextDetail,
 ) -> Option<CapturedFrame> {
     let started = Instant::now();
     let width = u32::try_from(frame.width()).ok()? & !1;
@@ -190,15 +206,27 @@ fn to_nv12(
         output.width as i32,
         output.height as i32,
     );
+    let text_detail = settings
+        .text_detail
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if text_detail {
+        detail.apply(
+            y,
+            stride_y as usize,
+            output.width as usize,
+            output.height as usize,
+        );
+    }
     let region = CaptureRegion {
         left: frame.left(),
         top: frame.top(),
         width,
         height,
     };
-    Some((
-        VideoFrame::new(VideoRotation::VideoRotation0, image),
+    Some(CapturedFrame {
+        frame: VideoFrame::new(VideoRotation::VideoRotation0, image),
         region,
         started,
-    ))
+        text_detail,
+    })
 }
