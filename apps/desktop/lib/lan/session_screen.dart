@@ -41,6 +41,7 @@ class _LanSessionScreenState extends State<LanSessionScreen>
   bool _switching = false;
   Timer? _switchTimeout;
   SurfaceScale _scale = SurfaceScale.fit;
+  bool _liftShadows = false;
   bool _full = false;
   bool _menuOpen = false;
   bool _controlPaused = false;
@@ -389,6 +390,7 @@ class _LanSessionScreenState extends State<LanSessionScreen>
             generation: _info.generation,
             canInput: _controlling && !_switching,
             scale: _scale,
+            liftShadows: _liftShadows,
           ),
         ),
         if (notice)
@@ -558,8 +560,12 @@ class _LanSessionScreenState extends State<LanSessionScreen>
               onModePreview: () => _setMenu(true),
               defaultQuality: widget.launch.settings.videoQuality,
               scale: _scale,
-              onQualityApplied: (scale) {
-                setState(() => _scale = scale);
+              liftShadows: _liftShadows,
+              onQualityApplied: (scale, liftShadows) {
+                setState(() {
+                  _scale = scale;
+                  _liftShadows = liftShadows;
+                });
                 _setMenu(false);
               },
               downloadRoot: widget.launch.settings.downloadRoot,

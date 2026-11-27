@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../connection/video_quality.dart';
@@ -10,6 +11,7 @@ import 'remote_surface.dart';
 typedef AppliedSessionQuality = ({
   VideoQuality quality,
   SurfaceScale scale,
+  bool liftShadows,
   bool sent,
   bool complete,
 });
@@ -20,6 +22,7 @@ class SessionQualityDialog extends StatefulWidget {
     required this.initial,
     required this.remoteConfirmed,
     required this.scale,
+    this.liftShadows = false,
     required this.readDecoded,
     required this.readSource,
     required this.apply,
@@ -28,6 +31,7 @@ class SessionQualityDialog extends StatefulWidget {
   final VideoQuality initial;
   final bool remoteConfirmed;
   final SurfaceScale scale;
+  final bool liftShadows;
   final Size Function() readDecoded;
   final Future<Size> Function() readSource;
   final Future<VideoQuality> Function(VideoQuality) apply;
@@ -39,6 +43,7 @@ class SessionQualityDialog extends StatefulWidget {
 class _SessionQualityDialogState extends State<SessionQualityDialog> {
   late VideoQuality _draft = widget.initial;
   late SurfaceScale _scale = widget.scale;
+  late bool _liftShadows = widget.liftShadows;
   late Size _decoded = widget.readDecoded();
   Size _source = Size.zero;
   Timer? _timer;
@@ -79,9 +84,10 @@ class _SessionQualityDialogState extends State<SessionQualityDialog> {
     final requested = _draft;
     final scale = _scale;
     final localOnly =
-        widget.remoteConfirmed &&
         requested.matches(widget.initial) &&
-        scale != widget.scale;
+        (widget.remoteConfirmed ||
+            scale != widget.scale ||
+            _liftShadows != widget.liftShadows);
     try {
       final applied = localOnly
           ? widget.initial
@@ -90,6 +96,7 @@ class _SessionQualityDialogState extends State<SessionQualityDialog> {
       Navigator.pop<AppliedSessionQuality>(context, (
         quality: applied,
         scale: scale,
+        liftShadows: _liftShadows,
         sent: !localOnly,
         complete: applied.matches(requested),
       ));
@@ -107,14 +114,10 @@ class _SessionQualityDialogState extends State<SessionQualityDialog> {
   Widget build(BuildContext context) {
     final small = Theme.of(context).textTheme.bodySmall;
     final limits = _draft.resolution;
-    final actualScale = _decoded.isEmpty
+    final ratio = MediaQuery.devicePixelRatioOf(context);
+    final display = _decoded.isEmpty
         ? null
-        : remoteFrameLayout(
-            sessionViewport(context),
-            _decoded,
-            widget.scale,
-            MediaQuery.devicePixelRatioOf(context),
-          ).physicalScale;
+        : remoteFrameLayout(sessionViewport(context), _decoded, _scale, ratio);
     String dimensions(Size size) =>
         '${size.width.round()} × ${size.height.round()}';
     return PopScope(
@@ -137,8 +140,6 @@ class _SessionQualityDialogState extends State<SessionQualityDialog> {
                       '当前接收 ${dimensions(_decoded)}'
                     else
                       '等待解码画面',
-                    if (actualScale != null)
-                      '当前显示 ${(actualScale * 100).toStringAsFixed(1)}%',
                   ].join('  ·  '),
                   style: small,
                 ),
@@ -153,7 +154,6 @@ class _SessionQualityDialogState extends State<SessionQualityDialog> {
                             _draft = _draft
                                 .withProfile(VideoProfile.clear)
                                 .withCaps(resolution: StreamResolution.native);
-                            _scale = SurfaceScale.original;
                           }),
                   ),
                 ),
@@ -195,10 +195,27 @@ class _SessionQualityDialogState extends State<SessionQualityDialog> {
                     ),
                   ),
                 ),
+                if (display != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      '${dimensions(display.size * ratio)} 屏幕像素 · ${(display.physicalScale * 100).toStringAsFixed(1)}%'
+                      '${ratio > 1 ? '\n系统倍率 ${ratio.toStringAsFixed(2)}×，占用 ${dimensions(display.size)} 逻辑点' : ''}',
+                      style: small,
+                    ),
+                  ),
                 if (_scale == SurfaceScale.original)
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
-                    child: Text('一个解码像素对应一个屏幕像素，画面超出窗口时可用滚动条查看。', style: small),
+                    child: Text('每个解码像素占一个屏幕像素。在高分屏上阅读可选「适配窗口」。', style: small),
+                  ),
+                if (defaultTargetPlatform == TargetPlatform.macOS)
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('提亮暗部'),
+                    subtitle: const Text('仅调整此 Mac 会话的阴影，默认显示解码原色。'),
+                    value: _liftShadows,
+                    onChanged: (value) => setState(() => _liftShadows = value),
                   ),
                 if (_error != null)
                   Padding(

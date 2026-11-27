@@ -18,7 +18,7 @@ class MainFlutterWindow: NSWindow {
     RegisterGeneratedPlugins(registry: flutterViewController)
     remoteTexture = RemoteTextureChannel(flutterViewController.registrar(forPlugin: "NexDeskTexture"), window: self)
     let messenger = flutterViewController.engine.binaryMessenger
-    let sessions = SessionWindows(messenger: messenger)
+    let sessions = SessionWindows(messenger: messenger, homeWindow: self)
     self.sessions = sessions
     background = NexDeskBackground(window: self, messenger: messenger) { [weak sessions] in
       sessions?.hasWindows == true
@@ -30,11 +30,13 @@ class MainFlutterWindow: NSWindow {
 
 private final class SessionWindows {
   private let channel: FlutterMethodChannel
+  private weak var homeWindow: NSWindow?
   private var windows: [Int64: SessionFlutterWindow] = [:]
 
   var hasWindows: Bool { !windows.isEmpty }
 
-  init(messenger: FlutterBinaryMessenger) {
+  init(messenger: FlutterBinaryMessenger, homeWindow: NSWindow) {
+    self.homeWindow = homeWindow
     channel = FlutterMethodChannel(name: "dev.nexdesk/session_window", binaryMessenger: messenger)
     channel.setMethodCallHandler { [weak self] call, reply in
       guard let self else { reply(false); return }
@@ -45,7 +47,7 @@ private final class SessionWindows {
               let title = values["title"] as? String, !title.isEmpty, title.utf8.count <= 1024,
               let launch = values["launch"] as? String, !launch.isEmpty, launch.utf8.count <= 16384,
               self.windows[id] == nil else { reply(false); return }
-        let window = SessionFlutterWindow(title: title, launch: launch) { [weak self] in
+        let window = SessionFlutterWindow(title: title, launch: launch, screen: self.homeWindow?.screen) { [weak self] in
           guard let self else { return }
           self.windows.removeValue(forKey: id)
           self.channel.invokeMethod("closed", arguments: id)
@@ -74,7 +76,7 @@ private final class SessionFlutterWindow: NSObject, NSWindowDelegate {
   private var remoteTexture: RemoteTextureChannel?
   private let onClosed: () -> Void
 
-  init(title: String, launch: String, onClosed: @escaping () -> Void) {
+  init(title: String, launch: String, screen: NSScreen?, onClosed: @escaping () -> Void) {
     let project = FlutterDartProject()
     project.dartEntrypointArguments = ["--nexdesk-session-window", launch]
     let controller = FlutterViewController(project: project)
@@ -89,9 +91,8 @@ private final class SessionFlutterWindow: NSObject, NSWindowDelegate {
     window.title = title
     window.tabbingMode = .disallowed
     window.isReleasedWhenClosed = false
-    window.contentViewController = controller
+    configureSessionContent(window, controller: controller, visibleFrame: (screen ?? NSScreen.main)?.visibleFrame)
     window.delegate = self
-    window.center()
     RegisterGeneratedPlugins(registry: controller)
     remoteTexture = RemoteTextureChannel(controller.registrar(forPlugin: "NexDeskTexture"), window: window)
     channel.setMethodCallHandler { [weak self] call, reply in
@@ -259,8 +260,15 @@ private final class FrameLibrary {
 private final class RemoteTexture: NSObject, FlutterTexture {
   let backend: FrameLibrary
   let viewer: UInt64
-  private var pool: CVPixelBufferPool?
-  private var poolDimensions: UInt64 = 0
+  private let worker = DispatchQueue(label: "dev.nexdesk.video.presentation", qos: .userInitiated)
+  private let sourcePool = VideoBufferPool()
+  private let renderer = MacVideoRenderer()
+  private let lock = NSLock()
+  private var latest: CVPixelBuffer?
+  // Accessed on the main thread. The raster thread only reads latest under lock.
+  private var busy = false
+  private var delivered: UInt64 = 0
+  private var settings = VideoPresentation.standard
 
   init(_ backend: FrameLibrary, _ viewer: UInt64) {
     self.backend = backend
@@ -268,34 +276,51 @@ private final class RemoteTexture: NSObject, FlutterTexture {
   }
 
   func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
+    lock.lock()
+    defer { lock.unlock() }
+    return latest.map { Unmanaged.passRetained($0) }
+  }
+
+  func configure(_ next: VideoPresentation) {
+    if settings != next {
+      settings = next
+      delivered = 0
+    }
+  }
+
+  func advance(onFrame: @escaping () -> Void) {
+    guard !busy else { return }
+    let sequence = backend.sequence(viewer)
+    guard sequence > 0, sequence != delivered else { return }
+    let requested = settings
+    busy = true
+    worker.async { [self] in
+      let frame = autoreleasepool { readFrame().flatMap { renderer.present($0, as: requested) } }
+      DispatchQueue.main.async { [self] in
+        busy = false
+        guard requested == settings, let frame else { return }
+        lock.lock()
+        latest = frame
+        lock.unlock()
+        delivered = sequence
+        onFrame()
+      }
+    }
+  }
+
+  private func readFrame() -> CVPixelBuffer? {
     let dimensions = backend.dimensions(viewer)
     let width = UInt32(dimensions >> 32)
     let height = UInt32(truncatingIfNeeded: dimensions)
     guard width > 0, height > 0, width <= 4096, height <= 4096 else { return nil }
-    if poolDimensions != dimensions {
-      let attributes: [String: Any] = [
-        kCVPixelBufferWidthKey as String: width,
-        kCVPixelBufferHeightKey as String: height,
-        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-        kCVPixelBufferMetalCompatibilityKey as String: true,
-        kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
-      ]
-      var next: CVPixelBufferPool?
-      guard CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &next) == kCVReturnSuccess
-      else { return nil }
-      pool = next
-      poolDimensions = dimensions
-    }
-    var output: CVPixelBuffer?
-    let bounds = [kCVPixelBufferPoolAllocationThresholdKey as String: 4] as CFDictionary
-    guard let pool, CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(nil, pool, bounds, &output) == kCVReturnSuccess,
-          let image = output, CVPixelBufferLockBaseAddress(image, []) == kCVReturnSuccess else { return nil }
+    guard let image = sourcePool.buffer(width: Int(width), height: Int(height)),
+          CVPixelBufferLockBaseAddress(image, []) == kCVReturnSuccess else { return nil }
     defer { CVPixelBufferUnlockBaseAddress(image, []) }
     guard let destination = CVPixelBufferGetBaseAddress(image) else { return nil }
     let stride = CVPixelBufferGetBytesPerRow(image)
     guard backend.copyBGRA(viewer, width, height, destination, UInt32(stride), stride * Int(height))
     else { return nil }
-    return Unmanaged.passRetained(image)
+    return image
   }
 }
 
@@ -304,7 +329,6 @@ private final class RemoteTextureChannel {
   private let channel: FlutterMethodChannel
   private var texture: RemoteTexture?
   private var textureId: Int64 = 0
-  private var sequence: UInt64 = 0
   private var timer: Timer?
   private weak var window: NSWindow?
 
@@ -337,6 +361,18 @@ private final class RemoteTextureChannel {
       panel.beginSheetModal(for: window) { response in
         result(response == .OK ? panel.url?.path : nil)
       }
+    } else if call.method == "presentation" {
+      guard let args = call.arguments as? [String: Any], let texture,
+            let id = args["texture"] as? NSNumber, id.int64Value == textureId,
+            let sw = args["sourceWidth"] as? Int, let sh = args["sourceHeight"] as? Int,
+            let tw = args["targetWidth"] as? Int, let th = args["targetHeight"] as? Int,
+            let shadows = args["liftShadows"] as? Bool,
+            [sw, sh, tw, th].allSatisfy({ (0...4096).contains($0) }) else { result(false); return }
+      let settings = VideoPresentation(sourceWidth: sw, sourceHeight: sh, targetWidth: tw,
+                                       targetHeight: th, liftShadows: shadows)
+      texture.configure(settings)
+      advance()
+      result(true)
     } else if call.method == "detach" {
       if let viewer = call.arguments as? NSNumber, viewer.uint64Value == texture?.viewer { reset() }
       result(nil)
@@ -366,10 +402,9 @@ private final class RemoteTextureChannel {
 
   private func advance() {
     guard let texture else { return }
-    let next = texture.backend.sequence(texture.viewer)
-    if next > 0 && next != sequence {
-      sequence = next
-      registry.textureFrameAvailable(textureId)
+    texture.advance { [weak self, weak texture] in
+      guard let self, let texture, self.texture === texture else { return }
+      self.registry.textureFrameAvailable(self.textureId)
     }
   }
 
@@ -379,6 +414,5 @@ private final class RemoteTextureChannel {
     if textureId != 0 { registry.unregisterTexture(textureId) }
     texture = nil
     textureId = 0
-    sequence = 0
   }
 }

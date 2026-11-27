@@ -23,6 +23,7 @@ class SessionTools extends StatefulWidget {
     required this.release,
     required this.onModePreview,
     required this.scale,
+    required this.liftShadows,
     required this.onQualityApplied,
     this.defaultQuality = const VideoQuality(),
     this.downloadRoot = '',
@@ -37,7 +38,8 @@ class SessionTools extends StatefulWidget {
   final VoidCallback release, onModePreview;
   final VideoQuality defaultQuality;
   final SurfaceScale scale;
-  final ValueChanged<SurfaceScale> onQualityApplied;
+  final bool liftShadows;
+  final void Function(SurfaceScale, bool) onQualityApplied;
   final String downloadRoot;
 
   @override
@@ -155,6 +157,7 @@ class _SessionToolsState extends State<SessionTools> {
         initial: initial,
         remoteConfirmed: active.isNotEmpty,
         scale: scale,
+        liftShadows: widget.liftShadows,
         readDecoded: () => _frameSize(native.inspect(viewer)['decoded_frame']),
         readSource: () async {
           final reply = await native.remote(viewer, 'diagnostics');
@@ -164,7 +167,7 @@ class _SessionToolsState extends State<SessionTools> {
       ),
     );
     if (!mounted || widget.viewer != viewer || selected == null) return;
-    widget.onQualityApplied(selected.scale);
+    widget.onQualityApplied(selected.scale, selected.liftShadows);
     final applied = selected.quality;
     final status = !selected.sent
         ? '已更新本地显示'
@@ -180,6 +183,7 @@ class _SessionToolsState extends State<SessionTools> {
         if (applied.maxMbps case final rate?) '$rate Mbps 上限',
       ],
       selected.scale.label,
+      if (selected.liftShadows) '已提亮暗部',
     ].join(' · ');
     Size received() => _frameSize(native.inspect(viewer)['decoded_frame']);
     ScaffoldMessenger.of(context)

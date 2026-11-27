@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,7 +10,7 @@ import 'native_desktop.dart';
 
 enum SurfaceScale {
   fit('适配窗口'),
-  original('原始像素'),
+  original('原始像素（物理 1:1）'),
   enlarge('放大到 200%');
 
   const SurfaceScale(this.label);
@@ -77,6 +79,7 @@ class RemoteSurface extends StatefulWidget {
     required this.generation,
     required this.canInput,
     this.scale = SurfaceScale.fit,
+    this.liftShadows = false,
   });
 
   final DesktopActionSender send;
@@ -84,6 +87,7 @@ class RemoteSurface extends StatefulWidget {
   final FocusNode focus;
   final bool canInput;
   final SurfaceScale scale;
+  final bool liftShadows;
 
   @override
   State<RemoteSurface> createState() => _RemoteSurfaceState();
@@ -234,6 +238,29 @@ class _RemoteSurfaceState extends State<RemoteSurface>
         ratio,
       );
       final size = layout.size;
+      Widget texture = Texture(
+        textureId: widget.texture,
+        filterQuality: layout.filter,
+      );
+      if (defaultTargetPlatform == TargetPlatform.macOS) {
+        final tw = (size.width * ratio).round(),
+            th = (size.height * ratio).round();
+        final enlarge =
+            widget.scale == SurfaceScale.fit &&
+            layout.filter != FilterQuality.none &&
+            tw > width &&
+            th > height &&
+            tw <= 4096 &&
+            th <= 4096 &&
+            tw * th <= 4096 * 2304;
+        texture = _MacVideoTexture(
+          texture: widget.texture,
+          source: (width, height),
+          target: enlarge ? (tw, th) : (0, 0),
+          liftShadows: widget.liftShadows,
+          filter: layout.filter,
+        );
+      }
       double snap(double available, double drawn) {
         final centered = math.max(0.0, (available - drawn) / 2);
         return (centered * ratio).round() / ratio - centered;
@@ -245,7 +272,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
             snap(constraints.maxWidth, size.width),
             snap(constraints.maxHeight, size.height),
           ),
-          child: _surface(size, layout.filter),
+          child: _surface(size, texture),
         ),
       );
       if (size.width <= constraints.maxWidth &&
@@ -281,7 +308,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
     },
   );
 
-  Widget _surface(Size size, FilterQuality filter) => SizedBox.fromSize(
+  Widget _surface(Size size, Widget texture) => SizedBox.fromSize(
     size: size,
     child: Focus(
       focusNode: widget.focus,
@@ -314,9 +341,99 @@ class _RemoteSurfaceState extends State<RemoteSurface>
               _wheel(event.localPosition, -event.localPanDelta, size);
             }
           },
-          child: Texture(textureId: widget.texture, filterQuality: filter),
+          child: texture,
         ),
       ),
     ),
+  );
+}
+
+class _MacVideoTexture extends StatefulWidget {
+  const _MacVideoTexture({
+    required this.texture,
+    required this.source,
+    required this.target,
+    required this.liftShadows,
+    required this.filter,
+  });
+
+  final int texture;
+  final (int, int) source, target;
+  final bool liftShadows;
+  final FilterQuality filter;
+
+  @override
+  State<_MacVideoTexture> createState() => _MacVideoTextureState();
+}
+
+class _MacVideoTextureState extends State<_MacVideoTexture> {
+  static const _channel = MethodChannel('dev.nexdesk/m1_texture');
+  Timer? _resize;
+  int _revision = 0;
+  bool _nativeSize = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_configure(++_revision));
+  }
+
+  @override
+  void didUpdateWidget(_MacVideoTexture old) {
+    super.didUpdateWidget(old);
+    final sameSource =
+        widget.texture == old.texture && widget.source == old.source;
+    final sameTone = widget.liftShadows == old.liftShadows;
+    if (sameSource && sameTone && widget.target == old.target) return;
+    final revision = ++_revision;
+    _nativeSize = false;
+    _resize?.cancel();
+    if (sameSource && sameTone && widget.target != (0, 0)) {
+      // While dragging, Flutter can scale the previous texture immediately.
+      _resize = Timer(
+        const Duration(milliseconds: 80),
+        () => _configure(revision),
+      );
+    } else {
+      unawaited(_configure(revision));
+    }
+  }
+
+  Future<void> _configure(int revision) async {
+    var accepted = false;
+    try {
+      accepted =
+          await _channel.invokeMethod<bool>('presentation', {
+            'texture': widget.texture,
+            'sourceWidth': widget.source.$1,
+            'sourceHeight': widget.source.$2,
+            'targetWidth': widget.target.$1,
+            'targetHeight': widget.target.$2,
+            'liftShadows': widget.liftShadows,
+          }) ==
+          true;
+    } on MissingPluginException {
+      // Older runners still display the original texture.
+    } on PlatformException {
+      // The texture may have detached while a new layout was pending.
+    }
+    if (mounted &&
+        revision == _revision &&
+        accepted &&
+        widget.target != (0, 0)) {
+      setState(() => _nativeSize = true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _resize?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Texture(
+    textureId: widget.texture,
+    filterQuality: _nativeSize ? FilterQuality.low : widget.filter,
   );
 }

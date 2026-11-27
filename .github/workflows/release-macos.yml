@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag (for example, v0.1.4)
-        required: true
+        description: Existing release tag, or leave empty to test the selected branch as Actions artifacts
+        required: false
         type: string
       architecture:
         description: Architectures to package
@@ -45,7 +45,7 @@ jobs:
       - name: Check out the release tag
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event_name == 'push' && github.sha || format('refs/tags/{0}', inputs.tag) }}
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
           path: source
           persist-credentials: false
 
@@ -63,12 +63,17 @@ jobs:
       - name: Verify release version
         working-directory: source
         env:
-          NEXDESK_TAG: ${{ inputs.tag || github.ref_name }}
+          NEXDESK_TAG: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+          VERIFY_DOWNLOAD: ${{ inputs.verify_download }}
         run: |
           set -eu
           version=$(awk '$1 == "version:" { split($2, parts, "+"); print parts[1] }' apps/desktop/pubspec.yaml)
           [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ $NEXDESK_TAG == "v$version" || $NEXDESK_TAG =~ ^v"$version"-preview\.[1-9][0-9]*$ ]]
+          if [[ -n $NEXDESK_TAG ]]; then
+            [[ $NEXDESK_TAG == "v$version" || $NEXDESK_TAG =~ ^v"$version"-preview\.[1-9][0-9]*$ ]]
+          else
+            [[ $VERIFY_DOWNLOAD != true ]]
+          fi
           printf 'NEXDESK_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
 
       - name: Test the published bundle
@@ -87,6 +92,14 @@ jobs:
           ditto -x -k "$work/$archive" "$work"
           codesign --verify --deep --strict "$work/NexDesk.app"
           python3 packaging/tools/release/check-macos-runtime.py "$work/NexDesk.app"
+
+      - name: Check session window geometry and Retina video presentation
+        if: ${{ !inputs.verify_download && hashFiles('source/apps/desktop/macos/Runner/SessionPresentation.swift') != '' }}
+        working-directory: source
+        run: |
+          xcrun swiftc apps/desktop/macos/Runner/SessionPresentation.swift \
+            tools/release/check-macos-presentation.swift -o "$RUNNER_TEMP/check-presentation"
+          "$RUNNER_TEMP/check-presentation"
 
       - name: Set up Rust and Flutter
         if: ${{ !inputs.verify_download }}
@@ -152,7 +165,7 @@ jobs:
           compression-level: 0
 
       - name: Attach archive to release
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.verify_download && !inputs.archive_only }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tag && !inputs.verify_download && !inputs.archive_only }}
         env:
           GH_TOKEN: ${{ github.token }}
           NEXDESK_TAG: ${{ inputs.tag }}
