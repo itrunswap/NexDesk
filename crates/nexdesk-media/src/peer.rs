@@ -1285,7 +1285,7 @@ fn address_scope(address: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    const SDR_CHIPS: [[u8; 3]; 12] = [
+    const SDR_CHIPS: [[u8; 3]; 16] = [
         [0; 3],
         [8; 3],
         [17; 3],
@@ -1298,6 +1298,10 @@ mod tests {
         [255; 3],
         [41, 78, 216],
         [230, 180, 75],
+        [16, 210, 40],
+        [224, 35, 55],
+        [220, 25, 210],
+        [16, 224, 195],
     ];
 
     // Exercises the real encoder and the platform decoder. No desktop capture or input
@@ -1350,21 +1354,9 @@ mod tests {
     #[ignore = "requires local ICE interfaces and platform media codecs"]
     async fn h264_desktop_sdr_from_windows() -> Result<(), MediaError> {
         use libwebrtc::video_frame::{EncodedFrameType, EncodedVideoCodec, EncodedVideoFrame};
-        // Windows x64 bundled OpenH264 and libyuv, SCREEN_CONTENT_REAL_TIME, one 192x32
-        // IDR. Each of the 12 RGB swatches above fills a 16-pixel-wide strip.
-        const WINDOWS_IDR: &[u8] = &[
-            0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xc0, 0x14, 0x8c, 0x68, 0x31, 0x48, 0x07, 0x84,
-            0x42, 0x35, 0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x3c, 0x80, 0x00, 0x00, 0x00, 0x01,
-            0x65, 0xb8, 0x00, 0x04, 0x7f, 0xff, 0xfe, 0x1e, 0x8a, 0x00, 0x02, 0x04, 0x7f, 0xff,
-            0x0f, 0xf0, 0xf5, 0x6b, 0xe1, 0xff, 0xf8, 0x7a, 0x29, 0xff, 0xff, 0xfc, 0x3d, 0x14,
-            0x3f, 0xff, 0xff, 0x87, 0xa2, 0x87, 0xff, 0xff, 0xf0, 0xf4, 0x50, 0xff, 0xff, 0xfe,
-            0x1e, 0x8a, 0x00, 0x04, 0x3f, 0xff, 0xff, 0x0f, 0x45, 0x00, 0x0f, 0xff, 0xff, 0xe1,
-            0xe8, 0xa0, 0x00, 0x20, 0x25, 0xff, 0xff, 0xf8, 0x7a, 0x28, 0x00, 0x7f, 0xff, 0xff,
-            0x04, 0x51, 0x40, 0x00, 0x40, 0xef, 0xc7, 0x00, 0x01, 0x02, 0xe8, 0xe0, 0x00, 0x7f,
-            0xff, 0xff, 0x82, 0x28, 0xa0, 0x00, 0x20, 0x25, 0xe3, 0x80, 0x00, 0x83, 0x8c, 0x70,
-            0x00, 0x10, 0x22, 0xa9, 0x05, 0x6b, 0x55, 0xd7, 0x5d, 0x6a, 0xba, 0xd5, 0x6e, 0xb7,
-            0x4f, 0x4e, 0xb0,
-        ];
+        // An untouched 1080p IDR from Windows x64's bundled libyuv and OpenH264
+        // SCREEN_CONTENT_REAL_TIME. Each source swatch is a 120-pixel-wide strip.
+        const WINDOWS_IDR: &[u8] = include_bytes!("../fixtures/windows-openh264-sdr-1080p.h264");
         let factory = PeerConnectionFactory::default();
         let offer = ControllerOffer::new().await?;
         let sdp = restrict_video_offer(offer.sdp(), Codec::H264)?;
@@ -1373,8 +1365,8 @@ mod tests {
             .set_remote_description(checked_description(&sdp, SdpType::Offer, false, false)?)
             .await?;
         let resolution = VideoResolution {
-            width: 192,
-            height: 32,
+            width: 1920,
+            height: 1080,
         };
         let source = NativeVideoSource::new_encoded(resolution.clone());
         let track = factory.create_video_track("desktop", source.clone());
@@ -1409,7 +1401,7 @@ mod tests {
         let mut tick = tokio::time::interval(Duration::from_millis(80));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut charts = 0;
-        let (sample, conversion) = timeout(Duration::from_secs(20), async {
+        let (sample, conversion, width, height) = timeout(Duration::from_secs(20), async {
             loop {
                 tokio::select! {
                     _ = tick.tick() => submit(),
@@ -1424,7 +1416,9 @@ mod tests {
                         // The regular startup pattern is colored and lacks a white band.
                         if sample[9][1].saturating_sub(sample[0][1]) > 150 {
                             charts += 1;
-                            if charts == 3 { break Ok::<_, MediaError>((sample, frame.color_conversion())); }
+                            if charts == 3 {
+                                break Ok::<_, MediaError>((sample, frame.color_conversion(), frame.width, frame.height));
+                            }
                         }
                     }
                 }
@@ -1432,7 +1426,7 @@ mod tests {
         }).await.map_err(|_| MediaError::VideoTimeout)??;
         let stats = view.stats().await?;
         println!(
-            "H.264 SDR decoded from {sender} by {:?} ({conversion}), RGB {sample:?}",
+            "H.264 SDR decoded from {sender} at {width}x{height} by {:?} ({conversion}), RGB {sample:?}",
             stats.codec_implementation
         );
         for (n, (got, expected)) in sample.iter().zip(SDR_CHIPS).enumerate() {
