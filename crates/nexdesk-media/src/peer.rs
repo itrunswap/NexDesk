@@ -1285,26 +1285,27 @@ fn address_scope(address: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    const SDR_CHIPS: [[u8; 3]; 12] = [
+        [0; 3],
+        [8; 3],
+        [17; 3],
+        [32; 3],
+        [48; 3],
+        [64; 3],
+        [96; 3],
+        [128; 3],
+        [224; 3],
+        [255; 3],
+        [41, 78, 216],
+        [230, 180, 75],
+    ];
+
     // Exercises the real encoder and the platform decoder. No desktop capture or input
     // permissions: both peers are local, and the video source contains only generated pixels.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires local ICE interfaces and platform media codecs"]
     async fn h264_desktop_sdr_roundtrip() -> Result<(), MediaError> {
         use crate::desktop_capture::DesktopPixels;
-        const CHIPS: [[u8; 3]; 12] = [
-            [0; 3],
-            [8; 3],
-            [17; 3],
-            [32; 3],
-            [48; 3],
-            [64; 3],
-            [96; 3],
-            [128; 3],
-            [224; 3],
-            [255; 3],
-            [41, 78, 216],
-            [230, 180, 75],
-        ];
         let media = HostMedia::new(MediaConfig {
             capture: CaptureTarget::Pattern,
             codec: Codec::H264,
@@ -1325,7 +1326,7 @@ mod tests {
         let (w, h) = (PROBE_WIDTH, PROBE_HEIGHT);
         let mut bgra = vec![0; (w * h * 4) as usize];
         for (i, pixel) in bgra.chunks_exact_mut(4).enumerate() {
-            let [r, g, b] = CHIPS[(i % w as usize) * CHIPS.len() / w as usize];
+            let [r, g, b] = SDR_CHIPS[(i % w as usize) * SDR_CHIPS.len() / w as usize];
             pixel.copy_from_slice(&[b, g, r, 255]);
         }
         let chart = DesktopPixels::default()
@@ -1339,18 +1340,84 @@ mod tests {
                 false,
             )
             .ok_or(MediaError::InvalidFrame)?;
+        verify_sdr_chart(&mut view, "local encoder", || {
+            source.capture_frame(&chart);
+        })
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires local ICE interfaces and platform media codecs"]
+    async fn h264_desktop_sdr_from_windows() -> Result<(), MediaError> {
+        use libwebrtc::video_frame::{EncodedFrameType, EncodedVideoCodec, EncodedVideoFrame};
+        // Windows x64 bundled OpenH264 and libyuv, SCREEN_CONTENT_REAL_TIME, one 192x32
+        // IDR. Each of the 12 RGB swatches above fills a 16-pixel-wide strip.
+        const WINDOWS_IDR: &[u8] = &[
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xc0, 0x14, 0x8c, 0x68, 0x31, 0x48, 0x07, 0x84,
+            0x42, 0x35, 0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x3c, 0x80, 0x00, 0x00, 0x00, 0x01,
+            0x65, 0xb8, 0x00, 0x04, 0x7f, 0xff, 0xfe, 0x1e, 0x8a, 0x00, 0x02, 0x04, 0x7f, 0xff,
+            0x0f, 0xf0, 0xf5, 0x6b, 0xe1, 0xff, 0xf8, 0x7a, 0x29, 0xff, 0xff, 0xfc, 0x3d, 0x14,
+            0x3f, 0xff, 0xff, 0x87, 0xa2, 0x87, 0xff, 0xff, 0xf0, 0xf4, 0x50, 0xff, 0xff, 0xfe,
+            0x1e, 0x8a, 0x00, 0x04, 0x3f, 0xff, 0xff, 0x0f, 0x45, 0x00, 0x0f, 0xff, 0xff, 0xe1,
+            0xe8, 0xa0, 0x00, 0x20, 0x25, 0xff, 0xff, 0xf8, 0x7a, 0x28, 0x00, 0x7f, 0xff, 0xff,
+            0x04, 0x51, 0x40, 0x00, 0x40, 0xef, 0xc7, 0x00, 0x01, 0x02, 0xe8, 0xe0, 0x00, 0x7f,
+            0xff, 0xff, 0x82, 0x28, 0xa0, 0x00, 0x20, 0x25, 0xe3, 0x80, 0x00, 0x83, 0x8c, 0x70,
+            0x00, 0x10, 0x22, 0xa9, 0x05, 0x6b, 0x55, 0xd7, 0x5d, 0x6a, 0xba, 0xd5, 0x6e, 0xb7,
+            0x4f, 0x4e, 0xb0,
+        ];
+        let factory = PeerConnectionFactory::default();
+        let offer = ControllerOffer::new().await?;
+        let sdp = restrict_video_offer(offer.sdp(), Codec::H264)?;
+        let peer = Peer::new(&factory, IceOptions::Lan)?;
+        peer.connection
+            .set_remote_description(checked_description(&sdp, SdpType::Offer, false, false)?)
+            .await?;
+        let resolution = VideoResolution {
+            width: 192,
+            height: 32,
+        };
+        let source = NativeVideoSource::new_encoded(resolution.clone());
+        let track = factory.create_video_track("desktop", source.clone());
+        let sender = peer
+            .connection
+            .add_track(MediaStreamTrack::Video(track), &["desktop"])?;
+        sender.set_video_encoder_backend(VideoEncoderBackend::PreEncoded);
+        let answer = peer
+            .connection
+            .create_answer(AnswerOptions::default())
+            .await?;
+        let answer = gather(&peer, answer, false).await?;
+        let mut view = offer.apply_answer(&answer).await?;
+        verify_sdr_chart(&mut view, "Windows OpenH264", || {
+            source.capture_encoded_frame(&EncodedVideoFrame {
+                codec: EncodedVideoCodec::H264,
+                payload: WINDOWS_IDR,
+                timestamp_us: 0,
+                frame_type: EncodedFrameType::Key,
+                resolution: resolution.clone(),
+                frame_metadata: None,
+            });
+        })
+        .await
+    }
+
+    async fn verify_sdr_chart(
+        view: &mut View,
+        sender: &str,
+        mut submit: impl FnMut(),
+    ) -> Result<(), MediaError> {
         let mut tick = tokio::time::interval(Duration::from_millis(80));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut charts = 0;
         let (sample, conversion) = timeout(Duration::from_secs(20), async {
             loop {
                 tokio::select! {
-                    _ = tick.tick() => { source.capture_frame(&chart); }
+                    _ = tick.tick() => submit(),
                     frame = view.next_frame() => {
                         let frame = frame?.ok_or(MediaError::VideoTimeout)?;
-                        let mut sample = [[0u8; 3]; CHIPS.len()];
+                        let mut sample = [[0u8; 3]; SDR_CHIPS.len()];
                         for (n, chip) in sample.iter_mut().enumerate() {
-                            let x = (2 * n + 1) * frame.width as usize / (2 * CHIPS.len());
+                            let x = (2 * n + 1) * frame.width as usize / (2 * SDR_CHIPS.len());
                             let i = 4 * (frame.height as usize / 2 * frame.width as usize + x);
                             chip.copy_from_slice(&frame.rgba[i..i + 3]);
                         }
@@ -1365,10 +1432,10 @@ mod tests {
         }).await.map_err(|_| MediaError::VideoTimeout)??;
         let stats = view.stats().await?;
         println!(
-            "H.264 SDR decoded by {:?} ({conversion}), RGB {sample:?}",
+            "H.264 SDR decoded from {sender} by {:?} ({conversion}), RGB {sample:?}",
             stats.codec_implementation
         );
-        for (n, (got, expected)) in sample.iter().zip(CHIPS).enumerate() {
+        for (n, (got, expected)) in sample.iter().zip(SDR_CHIPS).enumerate() {
             let tolerance = if n < 10 { 4 } else { 9 };
             assert!(
                 got.iter()
