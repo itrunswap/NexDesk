@@ -1,10 +1,21 @@
 //! Interpret VideoToolbox's actual CVPixelBuffer before WebRTC flattens it to I420.
-use std::ffi::c_void;
+use std::{ffi::c_void, ptr::NonNull, slice};
 
 use crate::sdr::nexdesk_planar_to_rgb;
-use libwebrtc::video_frame::BoxVideoFrame;
+use crate::{FrameSize, text_detail::TextDetail};
+use libwebrtc::{
+    native::yuv_helper,
+    video_frame::{BoxVideoFrame, native::NativeBuffer},
+};
 
 unsafe extern "C" {
+    fn nexdesk_cv_capture_pool(width: i32, height: i32) -> *mut c_void;
+    fn nexdesk_cv_capture_pool_release(pool: *mut c_void);
+    fn nexdesk_cv_capture_begin(pool: *mut c_void) -> *mut c_void;
+    fn CVPixelBufferGetBaseAddressOfPlane(image: *mut c_void, plane: usize) -> *mut u8;
+    fn CVPixelBufferGetBytesPerRowOfPlane(image: *mut c_void, plane: usize) -> usize;
+    fn CVPixelBufferUnlockBaseAddress(image: *mut c_void, flags: u64) -> i32;
+    fn CFRelease(value: *const c_void);
     fn nexdesk_cv_color(image: *mut c_void) -> i32;
     fn nexdesk_cv_to_rgb(
         image: *mut c_void,
@@ -15,6 +26,92 @@ unsafe extern "C" {
         width: i32,
         height: i32,
     ) -> bool;
+}
+
+#[derive(Default)]
+pub(crate) struct CapturePool {
+    pool: Option<NonNull<c_void>>,
+    dimensions: Option<FrameSize>,
+}
+
+// The capture callback exclusively owns this pool. CoreVideo retains outstanding images.
+unsafe impl Send for CapturePool {}
+
+impl Drop for CapturePool {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool {
+            // SAFETY: This is the single ownership reference from nexdesk_cv_capture_pool.
+            unsafe { nexdesk_cv_capture_pool_release(pool.as_ptr()) };
+        }
+    }
+}
+
+struct LockedCapture(NonNull<c_void>);
+
+impl Drop for LockedCapture {
+    fn drop(&mut self) {
+        // SAFETY: capture_begin transferred one locked, owned pixel buffer.
+        unsafe {
+            CVPixelBufferUnlockBaseAddress(self.0.as_ptr(), 0);
+            CFRelease(self.0.as_ptr());
+        }
+    }
+}
+
+impl CapturePool {
+    pub(crate) fn convert(
+        &mut self,
+        bgra: &[u8],
+        stride: u32,
+        size: FrameSize,
+        detail: Option<&mut TextDetail>,
+    ) -> Option<NativeBuffer> {
+        if self.dimensions != Some(size) {
+            // SAFETY: The pool validates its dimensions and returns a new owned reference.
+            let pool = NonNull::new(unsafe {
+                nexdesk_cv_capture_pool(size.width as i32, size.height as i32)
+            })?;
+            *self = Self {
+                pool: Some(pool),
+                dimensions: Some(size),
+            };
+        }
+        // SAFETY: The pool remains alive. The returned buffer is exclusively locked for writing.
+        let locked = LockedCapture(NonNull::new(unsafe {
+            nexdesk_cv_capture_begin(self.pool?.as_ptr())
+        })?);
+        let cv = locked.0.as_ptr();
+        // SAFETY: The pool provides distinct writable 420v Y and UV planes at size.
+        unsafe {
+            let plane = |n: usize, rows: usize| {
+                let stride = CVPixelBufferGetBytesPerRowOfPlane(cv, n);
+                let ptr = NonNull::new(CVPixelBufferGetBaseAddressOfPlane(cv, n))?;
+                Some((
+                    slice::from_raw_parts_mut(ptr.as_ptr(), stride.checked_mul(rows)?),
+                    u32::try_from(stride).ok()?,
+                ))
+            };
+            let (y, ys) = plane(0, size.height as usize)?;
+            let (uv, uvs) = plane(1, size.height.div_ceil(2) as usize)?;
+            yuv_helper::argb_to_nv12(
+                bgra,
+                stride,
+                y,
+                ys,
+                uv,
+                uvs,
+                size.width as i32,
+                size.height as i32,
+            );
+            if let Some(detail) = detail {
+                detail.apply(y, ys as usize, size.width as usize, size.height as usize);
+            }
+            CVPixelBufferUnlockBaseAddress(cv, 0);
+            std::mem::forget(locked);
+            // The SDK consumes the +1 reference when wrapping the CVPixelBuffer.
+            Some(NativeBuffer::from_cv_pixel_buffer(cv))
+        }
+    }
 }
 
 pub(crate) struct DecodedFrame {

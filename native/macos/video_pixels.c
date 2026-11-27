@@ -1,5 +1,74 @@
 #include <CoreVideo/CoreVideo.h>
+#include <stdlib.h>
 #include "sdr_pixels.h"
+
+typedef struct {
+    CVPixelBufferPoolRef buffers;
+    CFDictionaryRef limit;
+} NexDeskCapturePool;
+
+static CFDictionaryRef dictionary(const void **keys, const void **values, CFIndex count) {
+    return CFDictionaryCreate(NULL, keys, values, count,
+                              &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+}
+
+NexDeskCapturePool *nexdesk_cv_capture_pool(int width, int height) {
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return NULL;
+    NexDeskCapturePool *pool = calloc(1, sizeof(*pool));
+    if (!pool) return NULL;
+    int format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, count = 8;
+    CFNumberRef w = CFNumberCreate(NULL, kCFNumberIntType, &width);
+    CFNumberRef h = CFNumberCreate(NULL, kCFNumberIntType, &height);
+    CFNumberRef f = CFNumberCreate(NULL, kCFNumberIntType, &format);
+    CFNumberRef max_buffers = CFNumberCreate(NULL, kCFNumberIntType, &count);
+    CFDictionaryRef surface = dictionary(NULL, NULL, 0);
+    const void *keys[] = { kCVPixelBufferWidthKey, kCVPixelBufferHeightKey,
+                           kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferIOSurfacePropertiesKey };
+    const void *values[] = { w, h, f, surface };
+    CFDictionaryRef attributes = w && h && f && surface ? dictionary(keys, values, 4) : NULL;
+    const void *limit_keys[] = { kCVPixelBufferPoolAllocationThresholdKey };
+    const void *limit_values[] = { max_buffers };
+    pool->limit = max_buffers ? dictionary(limit_keys, limit_values, 1) : NULL;
+    CVReturn rc = attributes && pool->limit
+        ? CVPixelBufferPoolCreate(NULL, NULL, attributes, &pool->buffers) : kCVReturnError;
+    if (attributes) CFRelease(attributes);
+    if (surface) CFRelease(surface);
+    if (max_buffers) CFRelease(max_buffers);
+    if (f) CFRelease(f);
+    if (h) CFRelease(h);
+    if (w) CFRelease(w);
+    if (rc != kCVReturnSuccess) {
+        if (pool->limit) CFRelease(pool->limit);
+        free(pool);
+        return NULL;
+    }
+    return pool;
+}
+
+void nexdesk_cv_capture_pool_release(NexDeskCapturePool *pool) {
+    if (!pool) return;
+    CVPixelBufferPoolRelease(pool->buffers);
+    CFRelease(pool->limit);
+    free(pool);
+}
+
+// The returned image has a +1 reference and is locked for writing on success.
+CVPixelBufferRef nexdesk_cv_capture_begin(NexDeskCapturePool *pool) {
+    CVPixelBufferRef image = NULL;
+    if (!pool || CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(
+            NULL, pool->buffers, pool->limit, &image) != kCVReturnSuccess) return NULL;
+    if (CVPixelBufferLockBaseAddress(image, 0) != kCVReturnSuccess) {
+        CVPixelBufferRelease(image);
+        return NULL;
+    }
+    CVBufferSetAttachment(image, kCVImageBufferYCbCrMatrixKey,
+        kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(image, kCVImageBufferColorPrimariesKey,
+        kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(image, kCVImageBufferTransferFunctionKey,
+        kCVImageBufferTransferFunction_sRGB, kCVAttachmentMode_ShouldPropagate);
+    return image;
+}
 
 // The low bit denotes full range. Zero denotes an unsupported pixel format.
 int nexdesk_cv_color(CVPixelBufferRef image) {

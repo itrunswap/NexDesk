@@ -1290,10 +1290,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires local ICE interfaces and platform media codecs"]
     async fn h264_desktop_sdr_roundtrip() -> Result<(), MediaError> {
-        use libwebrtc::{
-            native::yuv_helper,
-            video_frame::{NV12Buffer, VideoFrame, VideoRotation},
-        };
+        use crate::desktop_capture::DesktopPixels;
         const CHIPS: [[u8; 3]; 12] = [
             [0; 3],
             [8; 3],
@@ -1319,6 +1316,7 @@ mod tests {
         let offer = ControllerOffer::new().await?;
         let (host, answer) = media.answer(offer.sdp()).await?;
         let mut view = offer.apply_answer(&answer).await?;
+        host.feed.capture.lock().unwrap().stop();
         let source = match &host.feed.sink {
             FrameSink::Raw(source) => source,
             #[cfg(target_os = "windows")]
@@ -1330,11 +1328,17 @@ mod tests {
             let [r, g, b] = CHIPS[(i % w as usize) * CHIPS.len() / w as usize];
             pixel.copy_from_slice(&[b, g, r, 255]);
         }
-        let mut image = NV12Buffer::new(w, h);
-        let (ys, uvs) = image.strides();
-        let (y, uv) = image.data_mut();
-        yuv_helper::argb_to_nv12(&bgra, w * 4, y, ys, uv, uvs, w as i32, h as i32);
-        let chart = VideoFrame::new(VideoRotation::VideoRotation0, image);
+        let chart = DesktopPixels::default()
+            .frame(
+                &bgra,
+                w * 4,
+                FrameSize {
+                    width: w,
+                    height: h,
+                },
+                false,
+            )
+            .ok_or(MediaError::InvalidFrame)?;
         let mut tick = tokio::time::interval(Duration::from_millis(80));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut charts = 0;

@@ -111,10 +111,6 @@ jobs:
           echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/flutter/bin/flutter" --suppress-analytics --no-version-check precache --macos
 
-      - name: Build and verify archive
-        if: ${{ !inputs.verify_download }}
-        run: NEXDESK_SOURCE_ROOT="$GITHUB_WORKSPACE/source" bash packaging/tools/release/package-macos.sh
-
       - name: Verify SDR color conversion and native frame buffers
         if: ${{ !inputs.verify_download }}
         working-directory: source
@@ -124,6 +120,10 @@ jobs:
           target=$(rustc -vV | awk '$1 == "host:" {print $2}')
           cargo test --release --locked --target "$target" -p nexdesk-media --lib
           cargo test --release --locked --target "$target" -p nexdesk-media --lib h264_desktop_sdr_roundtrip -- --ignored --nocapture
+
+      - name: Build and verify archive
+        if: ${{ !inputs.verify_download }}
+        run: NEXDESK_SOURCE_ROOT="$GITHUB_WORKSPACE/source" bash packaging/tools/release/package-macos.sh
 
       - name: Verify the archived app and start its managed receiver
         if: ${{ !inputs.verify_download }}

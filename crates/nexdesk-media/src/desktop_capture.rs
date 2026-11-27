@@ -3,10 +3,11 @@
 use std::{slice, sync::Arc, time::Instant};
 
 use cxx::UniquePtr;
-use libwebrtc::{
-    native::yuv_helper,
-    video_frame::{NV12Buffer, VideoFrame, VideoRotation},
-};
+#[cfg(target_os = "macos")]
+use libwebrtc::video_frame::native::NativeBuffer as DesktopBuffer;
+use libwebrtc::video_frame::{VideoFrame, VideoRotation};
+#[cfg(not(target_os = "macos"))]
+use libwebrtc::{native::yuv_helper, video_frame::NV12Buffer as DesktopBuffer};
 use webrtc_sys::desktop_capturer::{
     DesktopCapturerCallback, DesktopCapturerCallbackWrapper,
     ffi::{DesktopCapturer, DesktopCapturerOptions, DesktopFrame, Source, new_desktop_capturer},
@@ -18,7 +19,7 @@ use crate::text_detail::TextDetail;
 use crate::{CaptureRegion, FrameSize, MediaError, capture::CaptureSettings};
 
 pub(crate) struct CapturedFrame {
-    pub(crate) frame: VideoFrame<NV12Buffer>,
+    pub(crate) frame: VideoFrame<DesktopBuffer>,
     pub(crate) region: CaptureRegion,
     pub(crate) started: Instant,
     pub(crate) text_detail: bool,
@@ -88,7 +89,7 @@ impl DesktopCapture {
                     callback,
                     settings,
                     scaled_bgra: Vec::new(),
-                    detail: TextDetail::default(),
+                    pixels: DesktopPixels::default(),
                 },
             ))));
         Ok(())
@@ -103,7 +104,7 @@ struct FrameCallback<F> {
     callback: F,
     settings: Arc<CaptureSettings>,
     scaled_bgra: Vec<u8>,
-    detail: TextDetail,
+    pixels: DesktopPixels,
 }
 
 impl<F> DesktopCapturerCallback for FrameCallback<F>
@@ -119,7 +120,7 @@ where
                         frame,
                         &self.settings,
                         &mut self.scaled_bgra,
-                        &mut self.detail,
+                        &mut self.pixels,
                     )
                 })
                 .ok_or(CaptureError::Temporary)
@@ -145,7 +146,7 @@ fn to_nv12(
     frame: &DesktopFrame,
     settings: &CaptureSettings,
     scratch: &mut Vec<u8>,
-    detail: &mut TextDetail,
+    converter: &mut DesktopPixels,
 ) -> Option<CapturedFrame> {
     let started = Instant::now();
     let width = u32::try_from(frame.width()).ok()? & !1;
@@ -192,31 +193,9 @@ fn to_nv12(
         }
         (scratch.as_slice(), out_stride)
     };
-    let mut image = NV12Buffer::new(output.width, output.height);
-    let (stride_y, stride_uv) = image.strides();
-    let (y, uv) = image.data_mut();
-    // Libyuv's little-endian ARGB input matches the capturer's BGRA bytes.
-    yuv_helper::argb_to_nv12(
-        pixels,
-        stride,
-        y,
-        stride_y,
-        uv,
-        stride_uv,
-        output.width as i32,
-        output.height as i32,
-    );
     let text_detail = settings
         .text_detail
         .load(std::sync::atomic::Ordering::Relaxed);
-    if text_detail {
-        detail.apply(
-            y,
-            stride_y as usize,
-            output.width as usize,
-            output.height as usize,
-        );
-    }
     let region = CaptureRegion {
         left: frame.left(),
         top: frame.top(),
@@ -224,9 +203,51 @@ fn to_nv12(
         height,
     };
     Some(CapturedFrame {
-        frame: VideoFrame::new(VideoRotation::VideoRotation0, image),
+        frame: converter.frame(pixels, stride, output, text_detail)?,
         region,
         started,
         text_detail,
     })
+}
+
+#[derive(Default)]
+pub(crate) struct DesktopPixels {
+    detail: TextDetail,
+    #[cfg(target_os = "macos")]
+    pool: crate::mac_pixels::CapturePool,
+}
+
+impl DesktopPixels {
+    pub(crate) fn frame(
+        &mut self,
+        bgra: &[u8],
+        stride: u32,
+        size: FrameSize,
+        enhance: bool,
+    ) -> Option<VideoFrame<DesktopBuffer>> {
+        let detail = enhance.then_some(&mut self.detail);
+        #[cfg(target_os = "macos")]
+        let image = self.pool.convert(bgra, stride, size, detail)?;
+        #[cfg(not(target_os = "macos"))]
+        let image = {
+            let mut image = DesktopBuffer::new(size.width, size.height);
+            let (ys, uvs) = image.strides();
+            let (y, uv) = image.data_mut();
+            yuv_helper::argb_to_nv12(
+                bgra,
+                stride,
+                y,
+                ys,
+                uv,
+                uvs,
+                size.width as i32,
+                size.height as i32,
+            );
+            if let Some(detail) = detail {
+                detail.apply(y, ys as usize, size.width as usize, size.height as usize);
+            }
+            image
+        };
+        Some(VideoFrame::new(VideoRotation::VideoRotation0, image))
+    }
 }
